@@ -1,0 +1,27 @@
+FROM python:3.11-slim-bookworm
+
+RUN apt-get update && apt-get install -y \
+    wget gnupg curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir "numpy==1.26.0" "transformers>=4.32.0,<4.45.0"
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir \
+    "numpy==1.26.0" \
+    playwright==1.40.0 \
+    httpx==0.26.0 \
+    aiokafka==0.10.0 \
+    chromadb==0.4.22 \
+    asyncpg==0.29.0 \
+    redis[asyncio]==5.0.1 \
+    sentence-transformers==2.7.0
+
+RUN playwright install chromium \
+    && playwright install-deps chromium
+
+COPY src/ingestion ./src/ingestion
+COPY src/core ./src/core
+
+CMD ["python", "-u", "src/ingestion/threat_intel_scraper.py"]

@@ -1,0 +1,198 @@
+{
+  "name": "CyberSentinel \u2014 CVE & Active Exploitation Alert Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "critical-cve",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-cve",
+      "name": "Webhook: Critical CVE",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ],
+      "webhookId": "critical-cve"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "active-exploitation",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-exploit",
+      "name": "Webhook: Active Exploitation",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        240,
+        500
+      ],
+      "webhookId": "active-exploitation"
+    },
+    {
+      "id": "ai-cve-analysis",
+      "name": "AI: Analyze CVE Impact (Multi-Provider)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        400
+      ],
+      "parameters": {
+        "jsCode": "\n// \u2500\u2500 Multi-Provider LLM Call \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n// Reads LLM_PROVIDER from env: claude | openai | gemini\n// Falls back gracefully if provider is unavailable.\n\nconst provider = ($env.LLM_PROVIDER || 'claude').toLowerCase();\nconst prompt   = 'Analyze this CVE for enterprise impact. CVE: ' + $json.cve_id + '. CVSS: ' + $json.cvss_score + '. Description: ' + $json.description + '. Source: ' + $json.source + '.\\n\\nProvide in 3 sentences max: 1) What systems are affected? 2) What is the attack vector? 3) What is the immediate recommended action? Be specific and actionable.';\nconst maxTok   = 512;\n\nlet apiUrl, headers, body, modelKey;\n\nif (provider === 'openai' || provider === 'gpt') {\n  // \u2500\u2500 OpenAI \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  const model = $env.OPENAI_MODEL_FAST || $env.LLM_MODEL_PRIMARY || 'gpt-4o';\n  apiUrl  = 'https://api.openai.com/v1/chat/completions';\n  headers = {\n    'Content-Type':  'application/json',\n    'Authorization': 'Bearer ' + $env.OPENAI_API_KEY,\n  };\n  body = JSON.stringify({\n    model,\n    max_tokens: maxTok,\n    messages: [{ role: 'user', content: prompt }],\n  });\n  modelKey = 'openai:' + model;\n\n} else if (provider === 'gemini' || provider === 'google') {\n  // \u2500\u2500 Gemini \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  const model = $env.GEMINI_MODEL_FAST || $env.LLM_MODEL_PRIMARY || 'gemini-1.5-pro';\n  apiUrl  = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${$env.GOOGLE_API_KEY}`;\n  headers = { 'Content-Type': 'application/json' };\n  body = JSON.stringify({\n    contents: [{ parts: [{ text: prompt }] }],\n    generationConfig: { maxOutputTokens: maxTok },\n  });\n  modelKey = 'gemini:' + model;\n\n} else {\n  // \u2500\u2500 Claude (default) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  const model = $env.LLM_MODEL_FAST || 'claude-sonnet-4-6';\n  apiUrl  = 'https://api.anthropic.com/v1/messages';\n  headers = {\n    'Content-Type':      'application/json',\n    'x-api-key':         $env.ANTHROPIC_API_KEY,\n    'anthropic-version': '2023-06-01',\n  };\n  body = JSON.stringify({\n    model,\n    max_tokens: maxTok,\n    messages: [{ role: 'user', content: prompt }],\n  });\n  modelKey = 'claude:' + model;\n}\n\n// Make the HTTP call\nconst resp = await $helpers.httpRequest({\n  method:  'POST',\n  url:     apiUrl,\n  headers: headers,\n  body:    body,\n});\n\n// \u2500\u2500 Extract text from provider-specific response format \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nlet responseText = '';\nif (provider === 'openai' || provider === 'gpt') {\n  responseText = resp.choices?.[0]?.message?.content || '';\n} else if (provider === 'gemini' || provider === 'google') {\n  responseText = resp.candidates?.[0]?.content?.parts?.[0]?.text || '';\n} else {\n  responseText = resp.content?.[0]?.text || '';\n}\n\nreturn [{ json: { responseText, modelKey, provider } }];\n"
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const alert = $input.first().json;\nconst analysis = $('AI: Analyze CVE Impact (Multi-Provider)').item.json?.responseText || 'Analysis unavailable';\nconst isCISA = alert.source === 'CISA_KEV';\nconst urgency = isCISA ? '\ud83d\udea8 ACTIVELY EXPLOITED' : `\u26a0\ufe0f CVSS ${alert.cvss_score}`;\nconst dueDate = alert.due_date ? `Due: ${alert.due_date}` : '';\nreturn [{ json: { ...alert, analysis, urgency, isCISA, dueDate } }];"
+      },
+      "id": "build-cve-package",
+      "name": "Build CVE Alert Package",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "method": "POST",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"blocks\": [\n    { \"type\": \"header\", \"text\": { \"type\": \"plain_text\", \"text\": \"{{ $json.urgency }} \u2014 {{ $json.cve_id }}\" } },\n    { \"type\": \"section\", \"fields\": [\n      { \"type\": \"mrkdwn\", \"text\": \"*CVE ID:*\\n`{{ $json.cve_id }}`\" },\n      { \"type\": \"mrkdwn\", \"text\": \"*CVSS Score:*\\n{{ $json.cvss_score }}\" },\n      { \"type\": \"mrkdwn\", \"text\": \"*Source:*\\n{{ $json.source }}\" },\n      { \"type\": \"mrkdwn\", \"text\": \"*{{ $json.isCISA ? 'Due Date' : 'Published' }}:*\\n{{ $json.isCISA ? $json.dueDate : $json.timestamp }}\" }\n    ]},\n    { \"type\": \"section\", \"text\": { \"type\": \"mrkdwn\", \"text\": \"*Description:*\\n{{ $json.description }}\" } },\n    { \"type\": \"section\", \"text\": { \"type\": \"mrkdwn\", \"text\": \"*\ud83e\udd16 AI Impact Analysis:*\\n{{ $json.analysis }}\" } },\n    { \"type\": \"divider\" },\n    { \"type\": \"context\", \"elements\": [{ \"type\": \"mrkdwn\", \"text\": \"CyberSentinel Threat Intel Pipeline  |  {{ $json.isCISA ? 'CISA Known Exploited Vulnerability' : 'NVD Critical CVE' }}\" }] }\n  ]\n}"
+      },
+      "id": "slack-cve",
+      "name": "Slack: CVE Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        940,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.JIRA_BASE_URL }}/rest/api/3/issue",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"fields\": {\n    \"project\": { \"key\": \"SEC\" },\n    \"summary\": \"{{ $json.urgency }}: {{ $json.cve_id }} \u2014 Patch Required\",\n    \"description\": {\n      \"type\": \"doc\", \"version\": 1,\n      \"content\": [{\"type\": \"paragraph\", \"content\": [{\"type\": \"text\", \"text\": \"CVE: {{ $json.cve_id }}\\nCVSS: {{ $json.cvss_score }}\\nSource: {{ $json.source }}\\n\\nDescription: {{ $json.description }}\\n\\nAI Analysis: {{ $json.analysis }}\\n\\n{{ $json.dueDate }}\"}]}]\n    },\n    \"issuetype\": { \"name\": \"Vulnerability\" },\n    \"priority\": { \"name\": \"{{ $json.isCISA ? 'Highest' : 'High' }}\" },\n    \"labels\": [\"vulnerability\", \"cve\", \"patch-required\", \"{{ $json.isCISA ? 'cisa-kev' : 'nvd-critical' }}\"],\n    \"duedate\": \"{{ $json.isCISA ? $json.due_date : '' }}\"\n  }\n}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "jira-cve-ticket",
+      "name": "Jira: Create Patch Ticket",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        940,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.TELEGRAM_BOT_TOKEN ? 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' : 'http://localhost/noop' }}",
+        "method": "POST",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"chat_id\": \"{{ $env.TELEGRAM_CHAT_ID }}\",\n  \"parse_mode\": \"HTML\",\n  \"text\": \"<b>{{ $json.urgency }}</b>\\n\\n<code>{{ $json.cve_id }}</code> | CVSS: <b>{{ $json.cvss_score }}</b>\\n\\n{{ $json.description }}\\n\\n<i>{{ $json.analysis }}</i>\"\n}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "telegram-cve",
+      "name": "Telegram: Security Team",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        940,
+        680
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook: Critical CVE": {
+      "main": [
+        [
+          {
+            "node": "Claude: Analyze CVE Impact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Active Exploitation": {
+      "main": [
+        [
+          {
+            "node": "Claude: Analyze CVE Impact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude: Analyze CVE Impact": {
+      "main": [
+        [
+          {
+            "node": "Build CVE Alert Package",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build CVE Alert Package": {
+      "main": [
+        [
+          {
+            "node": "Slack: CVE Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Jira: Create Patch Ticket",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Telegram: Security Team",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    "cybersentinel",
+    "threat-intel",
+    "cve",
+    "production"
+  ]
+}

@@ -1,0 +1,133 @@
+{
+  "name": "CyberSentinel — Incident SLA Watchdog & Escalation",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "*/15 * * * *" }]
+        }
+      },
+      "id": "sla-schedule",
+      "name": "Schedule: Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.CYBERSENTINEL_API_URL }}/auth/token",
+        "method": "POST",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "body": "username=admin&password={{ $env.CYBERSENTINEL_API_PASSWORD }}"
+      },
+      "id": "sla-auth",
+      "name": "Authenticate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.CYBERSENTINEL_API_URL }}/api/v1/incidents?status=OPEN",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "Authorization", "value": "=Bearer {{ $('Authenticate').item.json.access_token }}" }]
+        }
+      },
+      "id": "fetch-open",
+      "name": "Fetch Open Incidents",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// SLA thresholds (minutes)\nconst SLA = { CRITICAL: 15, HIGH: 60, MEDIUM: 240, LOW: 1440 };\n\nconst incidents = $input.first().json;\nif (!Array.isArray(incidents)) return [];\n\nconst now = Date.now();\nconst breached = [];\n\nfor (const inc of incidents) {\n  const created = new Date(inc.created_at).getTime();\n  const ageMinutes = Math.floor((now - created) / 60000);\n  const threshold = SLA[inc.severity] || 1440;\n  const slaRemaining = threshold - ageMinutes;\n  const slaBreached = ageMinutes >= threshold;\n  const slaWarning = slaRemaining <= threshold * 0.2 && !slaBreached;\n\n  if (slaBreached || slaWarning) {\n    breached.push({\n      ...inc,\n      ageMinutes,\n      threshold,\n      slaRemaining: Math.max(0, slaRemaining),\n      slaBreached,\n      slaWarning,\n      escalationReason: slaBreached\n        ? `SLA BREACHED: ${ageMinutes}min elapsed (max ${threshold}min for ${inc.severity})`\n        : `SLA WARNING: Only ${slaRemaining}min remaining for ${inc.severity} incident`,\n    });\n  }\n}\n\nreturn breached.map(b => ({ json: b }));"
+      },
+      "id": "check-sla",
+      "name": "Check SLA Breaches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            { "leftValue": "={{ $json.slaBreached }}", "rightValue": true, "operator": { "type": "boolean", "operation": "equals" } }
+          ]
+        }
+      },
+      "id": "is-breached",
+      "name": "Is SLA Breached?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://events.pagerduty.com/v2/enqueue",
+        "method": "POST",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"routing_key\": \"{{ $env.PAGERDUTY_API_KEY }}\",\n  \"event_action\": \"trigger\",\n  \"dedup_key\": \"sla_{{ $json.incident_id }}\",\n  \"payload\": {\n    \"summary\": \"SLA BREACH: {{ $json.incident_id }} ({{ $json.severity }}) — {{ $json.ageMinutes }}min unresolved\",\n    \"source\": \"CyberSentinel SLA Watchdog\",\n    \"severity\": \"critical\",\n    \"custom_details\": {\n      \"incident_id\": \"{{ $json.incident_id }}\",\n      \"title\": \"{{ $json.title }}\",\n      \"age_minutes\": \"{{ $json.ageMinutes }}\",\n      \"sla_threshold\": \"{{ $json.threshold }}\",\n      \"reason\": \"{{ $json.escalationReason }}\"\n    }\n  }\n}",
+        "options": { "response": { "response": { "neverError": true } } }
+      },
+      "id": "page-breach",
+      "name": "PagerDuty: SLA Breach Escalation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1340, 200]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "method": "POST",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"blocks\": [\n    { \"type\": \"header\", \"text\": { \"type\": \"plain_text\", \"text\": \"{{ $json.slaBreached ? '🚨 SLA BREACH' : '⚠️ SLA WARNING' }} — {{ $json.incident_id }}\" } },\n    { \"type\": \"section\", \"fields\": [\n      { \"type\": \"mrkdwn\", \"text\": \"*Incident:*\\n{{ $json.title }}\" },\n      { \"type\": \"mrkdwn\", \"text\": \"*Severity:*\\n{{ $json.severity }}\" },\n      { \"type\": \"mrkdwn\", \"text\": \"*Age:*\\n{{ $json.ageMinutes }} minutes\" },\n      { \"type\": \"mrkdwn\", \"text\": \"*SLA Limit:*\\n{{ $json.threshold }} minutes\" }\n    ]},\n    { \"type\": \"section\", \"text\": { \"type\": \"mrkdwn\", \"text\": \"*Reason:* {{ $json.escalationReason }}\" } }\n  ]\n}",
+        "options": { "response": { "response": { "neverError": true } } }
+      },
+      "id": "slack-sla",
+      "name": "Slack: SLA Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1340, 400]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SERVICENOW_BASE_URL }}/api/now/table/incident/{{ $json.incident_id }}",
+        "method": "PATCH",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={ \"urgency\": \"1\", \"priority\": \"1\", \"work_notes\": \"Escalated by CyberSentinel SLA Watchdog: {{ $json.escalationReason }}\" }",
+        "options": { "response": { "response": { "neverError": true } } }
+      },
+      "id": "servicenow-escalate",
+      "name": "ServiceNow: Escalate Priority",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1340, 600]
+    }
+  ],
+  "connections": {
+    "Schedule: Every 15 Minutes": { "main": [[{ "node": "Authenticate", "type": "main", "index": 0 }]] },
+    "Authenticate": { "main": [[{ "node": "Fetch Open Incidents", "type": "main", "index": 0 }]] },
+    "Fetch Open Incidents": { "main": [[{ "node": "Check SLA Breaches", "type": "main", "index": 0 }]] },
+    "Check SLA Breaches": { "main": [[{ "node": "Is SLA Breached?", "type": "main", "index": 0 }]] },
+    "Is SLA Breached?": {
+      "main": [
+        [{ "node": "PagerDuty: SLA Breach Escalation", "type": "main", "index": 0 }],
+        [{ "node": "Slack: SLA Alert", "type": "main", "index": 0 }]
+      ]
+    },
+    "PagerDuty: SLA Breach Escalation": { "main": [[{ "node": "Slack: SLA Alert", "type": "main", "index": 0 }]] },
+    "Slack: SLA Alert": { "main": [[{ "node": "ServiceNow: Escalate Priority", "type": "main", "index": 0 }]] }
+  },
+  "active": true,
+  "settings": { "executionOrder": "v1" },
+  "tags": ["cybersentinel", "sla", "escalation", "production"]
+}

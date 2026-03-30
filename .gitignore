@@ -1,0 +1,149 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CyberSentinel AI — .gitignore
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Environment & Secrets ─────────────────────────────────────────────────────
+.env
+.env.local
+.env.production
+.env.staging
+.env.test
+.env.*.local
+# Allow .env.example — it contains only placeholders, safe to commit
+!.env.example
+
+# ── SSL / TLS / Certificates ──────────────────────────────────────────────────
+*.pem
+*.key
+*.crt
+*.cert
+*.csr
+*.p12
+*.pfx
+*.jks
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+
+# ── Database Dumps & Backups ──────────────────────────────────────────────────
+*.dump
+*.sql.gz
+*.sql.bz2
+*.backup
+*.bak
+dump.rdb
+appendonly.aof
+
+# ── n8n Credentials (may contain real API keys from UI configuration) ─────────
+n8n/credentials/
+n8n/.n8n/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+ENV/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ── Test & Coverage Reports ───────────────────────────────────────────────────
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.xml
+nosetests.xml
+test-results/
+junit.xml
+
+# ── Node / Frontend ───────────────────────────────────────────────────────────
+node_modules/
+frontend/dist/
+frontend/build/
+frontend/.vite/
+.npm
+.yarn/cache
+.yarn/unplugged
+.pnp.*
+
+# ── Docker Runtime Data ───────────────────────────────────────────────────────
+# Local volume mount directories (if ever used instead of named volumes)
+data/
+volumes/
+postgres_data/
+redis_data/
+chromadb_data/
+kafka_data/
+grafana_data/
+n8n_data/
+
+# ── Claude Code Session Files ─────────────────────────────────────────────────
+# Contains conversation history which may include API responses with data
+.claude/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+*.log.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── OS Generated ──────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ── IDE & Editors ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# ── Temporary Files ───────────────────────────────────────────────────────────
+*.tmp
+*.temp
+tmp/
+temp/
+.cache/
+
+# ── Word / Office Documents (project explanation docs with potential PII) ─────
+*.docx
+*.xlsx
+*.pptx
+
+# ── Jupyter Notebooks Checkpoints ─────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Playwright & Browser Automation ───────────────────────────────────────────
+playwright-report/
+test-results/
+/test-results/
+
+# ── Prometheus & Grafana Local State ─────────────────────────────────────────
+prometheus_data/

@@ -1,0 +1,19 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir "numpy==1.26.0" "transformers>=4.32.0,<4.45.0"
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir \
+    "numpy==1.26.0" \
+    aiokafka==0.10.0 \
+    chromadb==0.4.22 \
+    asyncpg==0.29.0 \
+    redis[asyncio]==5.0.1 \
+    sentence-transformers==2.7.0
+
+COPY src/models ./src/models
+COPY src/core ./src/core
+COPY src/ingestion ./src/ingestion
+
+CMD ["python", "-u", "src/models/rlm_engine.py"]

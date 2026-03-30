@@ -1,0 +1,20 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+
+  - name: PostgreSQL
+    type: postgres
+    url: postgres:5432
+    database: cybersentinel
+    user: sentinel
+    secureJsonData:
+      password: "${POSTGRES_PASSWORD}"
+    jsonData:
+      sslmode: disable
+      postgresVersion: 15000
+      timescaledb: true

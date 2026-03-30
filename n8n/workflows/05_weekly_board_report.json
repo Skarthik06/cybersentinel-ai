@@ -1,0 +1,395 @@
+{
+  "name": "CyberSentinel \u2014 Weekly Executive Board Report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "schedule-weekly",
+      "name": "Schedule: Monday 8AM Weekly",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.CYBERSENTINEL_API_URL }}/auth/token",
+        "method": "POST",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "body": "username=admin&password={{ $env.CYBERSENTINEL_API_PASSWORD }}"
+      },
+      "id": "auth",
+      "name": "Authenticate API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        460,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.CYBERSENTINEL_API_URL }}/api/v1/dashboard",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Authenticate API').item.json.access_token }}"
+            }
+          ]
+        }
+      },
+      "id": "fetch-weekly-stats",
+      "name": "Fetch Weekly Dashboard Stats",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        680,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.CYBERSENTINEL_API_URL }}/api/v1/alerts?hours=168&limit=200",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Authenticate API').item.json.access_token }}"
+            }
+          ]
+        }
+      },
+      "id": "fetch-week-alerts",
+      "name": "Fetch All Alerts (7 Days)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        680,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.CYBERSENTINEL_API_URL }}/api/v1/incidents?status=OPEN",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Authenticate API').item.json.access_token }}"
+            }
+          ]
+        }
+      },
+      "id": "fetch-open-incidents",
+      "name": "Fetch Open Incidents",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        680,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.CYBERSENTINEL_API_URL }}/api/v1/incidents?status=RESOLVED",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Authenticate API').item.json.access_token }}"
+            }
+          ]
+        }
+      },
+      "id": "fetch-resolved",
+      "name": "Fetch Resolved This Week",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        680,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aggregate all data for Claude AI analysis\nconst stats = $('Fetch Weekly Dashboard Stats').item.json;\nconst allAlerts = $('Fetch All Alerts (7 Days)').item.json || [];\nconst openIncidents = $('Fetch Open Incidents').item.json || [];\nconst resolvedIncidents = $('Fetch Resolved This Week').item.json || [];\n\n// Weekly alert breakdown by severity\nconst bySeverity = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 };\nconst byType = {};\nconst byMitre = {};\nconst attackerIPs = {};\n\nfor (const a of allAlerts) {\n  if (a.severity) bySeverity[a.severity] = (bySeverity[a.severity] || 0) + 1;\n  if (a.type) byType[a.type] = (byType[a.type] || 0) + 1;\n  if (a.mitre_technique) byMitre[a.mitre_technique] = (byMitre[a.mitre_technique] || 0) + 1;\n  if (a.src_ip) attackerIPs[a.src_ip] = (attackerIPs[a.src_ip] || 0) + 1;\n}\n\n// Top attackers\nconst topAttackers = Object.entries(attackerIPs)\n  .sort((a, b) => b[1] - a[1])\n  .slice(0, 5)\n  .map(([ip, count]) => ({ ip, count }));\n\n// Top MITRE techniques\nconst topMitre = Object.entries(byMitre)\n  .sort((a, b) => b[1] - a[1])\n  .slice(0, 5)\n  .map(([technique, count]) => ({ technique, count }));\n\n// Top threat types\nconst topTypes = Object.entries(byType)\n  .sort((a, b) => b[1] - a[1])\n  .slice(0, 5)\n  .map(([type, count]) => ({ type, count }));\n\n// Resolution rate\nconst totalIncidents = openIncidents.length + resolvedIncidents.length;\nconst resolutionRate = totalIncidents > 0\n  ? Math.round((resolvedIncidents.length / totalIncidents) * 100)\n  : 100;\n\n// Risk posture score (0-100, higher = worse)\nconst riskScore = Math.min(100, Math.round(\n  bySeverity.CRITICAL * 10 +\n  bySeverity.HIGH * 3 +\n  bySeverity.MEDIUM * 0.5 +\n  openIncidents.length * 5\n));\n\nconst riskPosture = riskScore > 70 ? 'CRITICAL RISK'\n  : riskScore > 40 ? 'ELEVATED RISK'\n  : riskScore > 20 ? 'MODERATE RISK'\n  : 'LOW RISK';\n\nconst weekOf = new Date();\nweekOf.setDate(weekOf.getDate() - 7);\nconst weekRange = `${weekOf.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} \u2013 ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;\n\nreturn [{ json: {\n  stats, bySeverity, topAttackers, topMitre, topTypes,\n  openIncidents: openIncidents.length,\n  resolvedIncidents: resolvedIncidents.length,\n  totalAlerts: allAlerts.length,\n  resolutionRate,\n  riskScore,\n  riskPosture,\n  weekRange,\n  openIncidentList: openIncidents.slice(0, 5),\n  topAttackers,\n  topMitre,\n}}];"
+      },
+      "id": "aggregate-weekly",
+      "name": "Aggregate Weekly Metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        460
+      ]
+    },
+    {
+      "id": "claude-board-report",
+      "name": "AI: Generate Board Report (Multi-Provider)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        460
+      ],
+      "parameters": {
+        "jsCode": "\n// \u2500\u2500 Multi-Provider LLM Call \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n// Reads LLM_PROVIDER from env: claude | openai | gemini\n// Falls back gracefully if provider is unavailable.\n\nconst provider = ($env.LLM_PROVIDER || 'claude').toLowerCase();\nconst prompt   = 'You are the CISO presenting the weekly cybersecurity posture report to the Board. Generate a comprehensive executive-level Weekly Security Board Report.\\n\\nWeek: ' + $('Aggregate Weekly Metrics').item.json.weekRange + '\\nRisk Posture: ' + $('Aggregate Weekly Metrics').item.json.riskPosture + ' (Score: ' + $('Aggregate Weekly Metrics').item.json.riskScore + '/100)\\nTotal Alerts: ' + $('Aggregate Weekly Metrics').item.json.totalAlerts + '\\nCritical: ' + $('Aggregate Weekly Metrics').item.json.bySeverity.CRITICAL + '\\nOpen Incidents: ' + $('Aggregate Weekly Metrics').item.json.openIncidents + '\\nResolution Rate: ' + $('Aggregate Weekly Metrics').item.json.resolutionRate + '%\\n\\nGenerate a board-ready report with: Executive Summary, Risk Posture, Key Metrics, Threat Landscape, Critical Incidents, Security Investments Performance, Compliance Posture, Recommended Board Actions, Outlook Next Week. Tone: Professional, non-technical, business-focused. Under 600 words.';\nconst maxTok   = 3000;\n\nlet apiUrl, headers, body, modelKey;\n\nif (provider === 'openai' || provider === 'gpt') {\n  // \u2500\u2500 OpenAI \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  const model = $env.OPENAI_MODEL_PRIMARY || $env.LLM_MODEL_PRIMARY || 'gpt-4o';\n  apiUrl  = 'https://api.openai.com/v1/chat/completions';\n  headers = {\n    'Content-Type':  'application/json',\n    'Authorization': 'Bearer ' + $env.OPENAI_API_KEY,\n  };\n  body = JSON.stringify({\n    model,\n    max_tokens: maxTok,\n    messages: [{ role: 'user', content: prompt }],\n  });\n  modelKey = 'openai:' + model;\n\n} else if (provider === 'gemini' || provider === 'google') {\n  // \u2500\u2500 Gemini \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  const model = $env.GEMINI_MODEL_PRIMARY || $env.LLM_MODEL_PRIMARY || 'gemini-1.5-pro';\n  apiUrl  = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${$env.GOOGLE_API_KEY}`;\n  headers = { 'Content-Type': 'application/json' };\n  body = JSON.stringify({\n    contents: [{ parts: [{ text: prompt }] }],\n    generationConfig: { maxOutputTokens: maxTok },\n  });\n  modelKey = 'gemini:' + model;\n\n} else {\n  // \u2500\u2500 Claude (default) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  const model = $env.LLM_MODEL_PRIMARY || 'claude-sonnet-4-6';\n  apiUrl  = 'https://api.anthropic.com/v1/messages';\n  headers = {\n    'Content-Type':      'application/json',\n    'x-api-key':         $env.ANTHROPIC_API_KEY,\n    'anthropic-version': '2023-06-01',\n  };\n  body = JSON.stringify({\n    model,\n    max_tokens: maxTok,\n    messages: [{ role: 'user', content: prompt }],\n  });\n  modelKey = 'claude:' + model;\n}\n\n// Make the HTTP call\nconst resp = await $helpers.httpRequest({\n  method:  'POST',\n  url:     apiUrl,\n  headers: headers,\n  body:    body,\n});\n\n// \u2500\u2500 Extract text from provider-specific response format \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nlet responseText = '';\nif (provider === 'openai' || provider === 'gpt') {\n  responseText = resp.choices?.[0]?.message?.content || '';\n} else if (provider === 'gemini' || provider === 'google') {\n  responseText = resp.candidates?.[0]?.content?.parts?.[0]?.text || '';\n} else {\n  responseText = resp.content?.[0]?.text || '';\n}\n\nreturn [{ json: { responseText, modelKey, provider } }];\n"
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const metrics = $('Aggregate Weekly Metrics').item.json;\nconst reportText = $('AI: Generate Board Report (Multi-Provider)').item.json?.responseText || 'Report generation failed';\n\nconst riskColor = {\n  'CRITICAL RISK': 'danger',\n  'ELEVATED RISK': 'warning',\n  'MODERATE RISK': 'good',\n  'LOW RISK': 'good'\n}[metrics.riskPosture] || 'warning';\n\nconst riskEmoji = {\n  'CRITICAL RISK': '\ud83d\udd34',\n  'ELEVATED RISK': '\ud83d\udfe0',\n  'MODERATE RISK': '\ud83d\udfe1',\n  'LOW RISK': '\ud83d\udfe2'\n}[metrics.riskPosture] || '\u26a0\ufe0f';\n\n// Format top MITRE as table rows\nconst mitreRows = metrics.topMitre\n  .map(m => `\u2022 ${m.technique}: ${m.count} occurrences`)\n  .join('\\n');\n\n// Format top attackers\nconst attackerRows = metrics.topAttackers\n  .map((a, i) => `${i+1}. ${a.ip} \u2014 ${a.count} alerts`)\n  .join('\\n');\n\nreturn [{ json: {\n  ...metrics,\n  reportText,\n  riskColor,\n  riskEmoji,\n  mitreRows,\n  attackerRows,\n  reportDate: new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }),\n} }];"
+      },
+      "id": "format-board-report",
+      "name": "Format Board Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "method": "POST",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"blocks\": [\n    {\n      \"type\": \"header\",\n      \"text\": { \"type\": \"plain_text\", \"text\": \"{{ $json.riskEmoji }} CyberSentinel Weekly Board Report \u2014 {{ $json.weekRange }}\" }\n    },\n    {\n      \"type\": \"section\",\n      \"fields\": [\n        { \"type\": \"mrkdwn\", \"text\": \"*Risk Posture:*\\n{{ $json.riskEmoji }} {{ $json.riskPosture }}\" },\n        { \"type\": \"mrkdwn\", \"text\": \"*Risk Score:*\\n{{ $json.riskScore }}/100\" },\n        { \"type\": \"mrkdwn\", \"text\": \"*Total Alerts (7d):*\\n{{ $json.totalAlerts }}\" },\n        { \"type\": \"mrkdwn\", \"text\": \"*Critical Alerts:*\\n{{ $json.bySeverity.CRITICAL }}\" },\n        { \"type\": \"mrkdwn\", \"text\": \"*Open Incidents:*\\n{{ $json.openIncidents }}\" },\n        { \"type\": \"mrkdwn\", \"text\": \"*Resolution Rate:*\\n{{ $json.resolutionRate }}%\" }\n      ]\n    },\n    { \"type\": \"divider\" },\n    {\n      \"type\": \"section\",\n      \"text\": { \"type\": \"mrkdwn\", \"text\": \"*Top MITRE Techniques:*\\n{{ $json.mitreRows }}\" }\n    },\n    { \"type\": \"divider\" },\n    {\n      \"type\": \"section\",\n      \"text\": { \"type\": \"mrkdwn\", \"text\": \"*Board Report Summary:*\\n{{ $json.reportText.substring(0, 1500) }}...\" }\n    },\n    {\n      \"type\": \"context\",\n      \"elements\": [{ \"type\": \"mrkdwn\", \"text\": \"Generated by CyberSentinel AI + Claude Opus  |  Full report delivered via email  |  {{ $json.reportDate }}\" }]\n    }\n  ]\n}"
+      },
+      "id": "slack-board",
+      "name": "Slack: Executive Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1560,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "cybersentinel-reports@{{ $env.SMTP_USER.split('@')[1] }}",
+        "toEmail": "={{ $env.BOARD_EMAIL || $env.SOC_EMAIL }}",
+        "subject": "=[{{ $json.riskPosture }}] CyberSentinel Weekly Security Board Report \u2014 {{ $json.weekRange }}",
+        "emailType": "html",
+        "message": "=<html><head><style>body{font-family:Arial,sans-serif;max-width:900px;margin:0 auto;padding:20px;color:#333}.header{background:#0D1B2A;color:white;padding:30px;border-radius:8px 8px 0 0}.header h1{margin:0;color:#4FC3F7;font-size:28px}.header p{color:#B0BEC5;margin:8px 0 0}.risk-banner{padding:15px 20px;font-size:18px;font-weight:bold;border-radius:0}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:15px;padding:20px;background:#F5F5F5}.metric-card{background:white;padding:15px;border-radius:6px;border-left:4px solid #1565C0;text-align:center}.metric-value{font-size:32px;font-weight:bold;color:#0D1B2A}.metric-label{font-size:12px;color:#666;margin-top:5px}.report-body{background:white;padding:25px;border-radius:6px;margin:20px 0;white-space:pre-wrap;line-height:1.7;font-size:14px}.footer{background:#F5F5F5;padding:15px;text-align:center;font-size:12px;color:#999;border-radius:0 0 8px 8px}</style></head><body><div class='header'><h1>\ud83d\udee1\ufe0f CyberSentinel AI \u2014 Weekly Board Report</h1><p>Security Posture Report for the week of {{ $json.weekRange }}</p></div><div class='risk-banner' style='background:{{ $json.riskPosture === \"CRITICAL RISK\" ? \"#C62828\" : $json.riskPosture === \"ELEVATED RISK\" ? \"#E65100\" : $json.riskPosture === \"MODERATE RISK\" ? \"#F9A825\" : \"#2E7D32\" }};color:white;'>{{ $json.riskEmoji }} Risk Posture: {{ $json.riskPosture }} &nbsp;|&nbsp; Score: {{ $json.riskScore }}/100</div><div class='metrics'><div class='metric-card'><div class='metric-value'>{{ $json.totalAlerts }}</div><div class='metric-label'>Total Alerts (7 Days)</div></div><div class='metric-card'><div class='metric-value' style='color:#C62828'>{{ $json.bySeverity.CRITICAL }}</div><div class='metric-label'>Critical Alerts</div></div><div class='metric-card'><div class='metric-value'>{{ $json.openIncidents }}</div><div class='metric-label'>Open Incidents</div></div><div class='metric-card'><div class='metric-value' style='color:#1565C0'>{{ $json.bySeverity.HIGH }}</div><div class='metric-label'>High Severity</div></div><div class='metric-card'><div class='metric-value' style='color:#2E7D32'>{{ $json.resolvedIncidents }}</div><div class='metric-label'>Resolved This Week</div></div><div class='metric-card'><div class='metric-value'>{{ $json.resolutionRate }}%</div><div class='metric-label'>Resolution Rate</div></div></div><div class='report-body'>{{ $json.reportText }}</div><div class='footer'>Generated by CyberSentinel AI powered by Claude Opus &nbsp;|&nbsp; {{ $json.reportDate }}<br>CONFIDENTIAL \u2014 Board Distribution Only</div></body></html>"
+      },
+      "id": "email-board",
+      "name": "Email: Board Distribution",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.TEAMS_WEBHOOK_URL }}",
+        "method": "POST",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"@type\": \"MessageCard\",\n  \"@context\": \"http://schema.org/extensions\",\n  \"themeColor\": \"{{ $json.riskPosture === 'CRITICAL RISK' ? 'FF0000' : $json.riskPosture === 'ELEVATED RISK' ? 'FF8C00' : '1565C0' }}\",\n  \"summary\": \"CyberSentinel Weekly Board Report\",\n  \"sections\": [\n    {\n      \"activityTitle\": \"{{ $json.riskEmoji }} Weekly Security Board Report \u2014 {{ $json.weekRange }}\",\n      \"activitySubtitle\": \"Risk Posture: {{ $json.riskPosture }} | Score: {{ $json.riskScore }}/100\",\n      \"facts\": [\n        { \"name\": \"Total Alerts (7d)\", \"value\": \"{{ $json.totalAlerts }}\" },\n        { \"name\": \"Critical Alerts\", \"value\": \"{{ $json.bySeverity.CRITICAL }}\" },\n        { \"name\": \"Open Incidents\", \"value\": \"{{ $json.openIncidents }}\" },\n        { \"name\": \"Resolution Rate\", \"value\": \"{{ $json.resolutionRate }}%\" },\n        { \"name\": \"Top MITRE Technique\", \"value\": \"{{ $json.topMitre[0] ? $json.topMitre[0].technique : 'None' }}\" }\n      ]\n    },\n    {\n      \"title\": \"Executive Summary\",\n      \"text\": \"{{ $json.reportText.substring(0, 800) }}...\"\n    }\n  ]\n}"
+      },
+      "id": "teams-board",
+      "name": "Teams: Leadership Channel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1560,
+        660
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.JIRA_BASE_URL }}/rest/api/3/issue",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"fields\": {\n    \"project\": { \"key\": \"SEC\" },\n    \"summary\": \"Weekly Security Review \u2014 {{ $json.weekRange }} [{{ $json.riskPosture }}]\",\n    \"description\": {\n      \"type\": \"doc\", \"version\": 1,\n      \"content\": [{\"type\": \"paragraph\", \"content\": [{\"type\": \"text\", \"text\": \"{{ $json.reportText.substring(0, 2000) }}\"}]}]\n    },\n    \"issuetype\": { \"name\": \"Task\" },\n    \"priority\": { \"name\": \"{{ $json.riskPosture === 'CRITICAL RISK' ? 'High' : 'Medium' }}\" },\n    \"labels\": [\"weekly-review\", \"board-report\", \"cybersentinel\", \"{{ $json.weekRange.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase() }}\"]\n  }\n}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "jira-weekly",
+      "name": "Jira: Create Weekly Review Ticket",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1780,
+        460
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule: Monday 8AM Weekly": {
+      "main": [
+        [
+          {
+            "node": "Authenticate API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Authenticate API": {
+      "main": [
+        [
+          {
+            "node": "Fetch Weekly Dashboard Stats",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch All Alerts (7 Days)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Open Incidents",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Resolved This Week",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Weekly Dashboard Stats": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Weekly Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch All Alerts (7 Days)": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Weekly Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Open Incidents": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Weekly Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Resolved This Week": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Weekly Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Weekly Metrics": {
+      "main": [
+        [
+          {
+            "node": "Claude Opus: Generate Board Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude Opus: Generate Board Report": {
+      "main": [
+        [
+          {
+            "node": "Format Board Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Board Report": {
+      "main": [
+        [
+          {
+            "node": "Slack: Executive Summary",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Email: Board Distribution",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Teams: Leadership Channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email: Board Distribution": {
+      "main": [
+        [
+          {
+            "node": "Jira: Create Weekly Review Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "tags": [
+    "cybersentinel",
+    "board-report",
+    "executive",
+    "weekly",
+    "production"
+  ]
+}

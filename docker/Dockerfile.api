@@ -1,0 +1,27 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir "numpy==1.26.0" "transformers>=4.32.0,<4.45.0"
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir \
+    "numpy==1.26.0" \
+    sentence-transformers==2.7.0 \
+    fastapi==0.109.0 \
+    uvicorn[standard]==0.27.0 \
+    asyncpg==0.29.0 \
+    redis[asyncio]==5.0.1 \
+    chromadb==0.4.22 \
+    python-jose[cryptography]==3.3.0 \
+    passlib[bcrypt]==1.7.4 \
+    bcrypt==4.0.1 \
+    python-multipart==0.0.7 \
+    httpx==0.26.0 \
+    pydantic==2.5.0
+
+COPY src/api ./src/api
+COPY src/core ./src/core
+COPY src/agents ./src/agents
+COPY src/ingestion ./src/ingestion
+
+CMD ["python", "-u", "-m", "uvicorn", "src.api.gateway:app", "--host", "0.0.0.0", "--port", "8080"]

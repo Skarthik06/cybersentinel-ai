@@ -1,0 +1,19 @@
+FROM python:3.11-slim
+
+# DPI requires libpcap for raw packet capture
+RUN apt-get update && apt-get install -y \
+    libpcap-dev gcc iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    scapy==2.5.0 \
+    aiokafka==0.10.0 \
+    redis[asyncio]==5.0.1 \
+    asyncpg==0.29.0
+
+COPY src/dpi ./src/dpi
+COPY src/core ./src/core
+
+CMD ["python", "-u", "src/dpi/sensor.py"]

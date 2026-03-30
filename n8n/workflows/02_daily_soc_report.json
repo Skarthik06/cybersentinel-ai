@@ -1,0 +1,294 @@
+{
+  "name": "CyberSentinel \u2014 Daily SOC Intelligence Report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Schedule: 7AM Mon\u2013Fri",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.CYBERSENTINEL_API_URL }}/auth/token",
+        "method": "POST",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "body": "username=admin&password={{ $env.CYBERSENTINEL_API_PASSWORD }}"
+      },
+      "id": "get-token",
+      "name": "Authenticate API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.CYBERSENTINEL_API_URL }}/api/v1/dashboard",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Authenticate API').item.json.access_token }}"
+            }
+          ]
+        }
+      },
+      "id": "fetch-dashboard",
+      "name": "Fetch Dashboard Stats",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        680,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.CYBERSENTINEL_API_URL }}/api/v1/alerts?severity=CRITICAL&hours=24&limit=10",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Authenticate API').item.json.access_token }}"
+            }
+          ]
+        }
+      },
+      "id": "fetch-critical-alerts",
+      "name": "Fetch Top Critical Alerts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        680,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.CYBERSENTINEL_API_URL }}/api/v1/incidents?status=OPEN",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Authenticate API').item.json.access_token }}"
+            }
+          ]
+        }
+      },
+      "id": "fetch-incidents",
+      "name": "Fetch Open Incidents",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        680,
+        560
+      ]
+    },
+    {
+      "id": "ai-report",
+      "name": "AI: Generate Daily Report (Multi-Provider)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        380
+      ],
+      "parameters": {
+        "jsCode": "\n// \u2500\u2500 Multi-Provider LLM Call \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n// Reads LLM_PROVIDER from env: claude | openai | gemini\n// Falls back gracefully if provider is unavailable.\n\nconst provider = ($env.LLM_PROVIDER || 'claude').toLowerCase();\nconst prompt   = 'You are a senior threat intelligence analyst. Generate a concise executive-level Daily SOC Report based on the following data:\\n\\n## Dashboard Stats (Last 24h)\\n' + JSON.stringify($('Fetch Dashboard Stats').item.json, null, 2) + '\\n\\n## Top Critical Alerts\\n' + JSON.stringify($('Fetch Top Critical Alerts').item.json, null, 2) + '\\n\\n## Open Incidents\\n' + JSON.stringify($('Fetch Open Incidents').item.json, null, 2) + '\\n\\nFormat the report with: 1. Executive Summary (3 sentences) 2. Key Threat Metrics 3. Top 3 Threats 4. MITRE ATT&CK Techniques 5. Recommended Actions. Be specific and under 500 words.';\nconst maxTok   = 2048;\n\nlet apiUrl, headers, body, modelKey;\n\nif (provider === 'openai' || provider === 'gpt') {\n  // \u2500\u2500 OpenAI \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  const model = $env.OPENAI_MODEL_ANALYSIS || $env.LLM_MODEL_PRIMARY || 'gpt-4o';\n  apiUrl  = 'https://api.openai.com/v1/chat/completions';\n  headers = {\n    'Content-Type':  'application/json',\n    'Authorization': 'Bearer ' + $env.OPENAI_API_KEY,\n  };\n  body = JSON.stringify({\n    model,\n    max_tokens: maxTok,\n    messages: [{ role: 'user', content: prompt }],\n  });\n  modelKey = 'openai:' + model;\n\n} else if (provider === 'gemini' || provider === 'google') {\n  // \u2500\u2500 Gemini \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  const model = $env.GEMINI_MODEL_ANALYSIS || $env.LLM_MODEL_PRIMARY || 'gemini-1.5-pro';\n  apiUrl  = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${$env.GOOGLE_API_KEY}`;\n  headers = { 'Content-Type': 'application/json' };\n  body = JSON.stringify({\n    contents: [{ parts: [{ text: prompt }] }],\n    generationConfig: { maxOutputTokens: maxTok },\n  });\n  modelKey = 'gemini:' + model;\n\n} else {\n  // \u2500\u2500 Claude (default) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  const model = $env.LLM_MODEL_ANALYSIS || 'claude-sonnet-4-6';\n  apiUrl  = 'https://api.anthropic.com/v1/messages';\n  headers = {\n    'Content-Type':      'application/json',\n    'x-api-key':         $env.ANTHROPIC_API_KEY,\n    'anthropic-version': '2023-06-01',\n  };\n  body = JSON.stringify({\n    model,\n    max_tokens: maxTok,\n    messages: [{ role: 'user', content: prompt }],\n  });\n  modelKey = 'claude:' + model;\n}\n\n// Make the HTTP call\nconst resp = await $helpers.httpRequest({\n  method:  'POST',\n  url:     apiUrl,\n  headers: headers,\n  body:    body,\n});\n\n// \u2500\u2500 Extract text from provider-specific response format \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nlet responseText = '';\nif (provider === 'openai' || provider === 'gpt') {\n  responseText = resp.choices?.[0]?.message?.content || '';\n} else if (provider === 'gemini' || provider === 'google') {\n  responseText = resp.candidates?.[0]?.content?.parts?.[0]?.text || '';\n} else {\n  responseText = resp.content?.[0]?.text || '';\n}\n\nreturn [{ json: { responseText, modelKey, provider } }];\n"
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const stats = $('Fetch Dashboard Stats').item.json;\nconst report = $('AI: Generate Daily Report (Multi-Provider)').item.json?.responseText || 'Report generation failed';\nconst date = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });\n\nconst riskLevel = stats.critical_alerts_24h > 10 ? '\ud83d\udd34 HIGH RISK' \n  : stats.critical_alerts_24h > 3 ? '\ud83d\udfe0 ELEVATED' \n  : '\ud83d\udfe2 NORMAL';\n\nreturn [{ json: { report, stats, date, riskLevel } }];"
+      },
+      "id": "build-report",
+      "name": "Build Report Package",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "method": "POST",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"blocks\": [\n    { \"type\": \"header\", \"text\": { \"type\": \"plain_text\", \"text\": \"\ud83d\udcca CyberSentinel Daily SOC Report \u2014 {{ $json.date }}\" } },\n    { \"type\": \"section\", \"text\": { \"type\": \"mrkdwn\", \"text\": \"*Risk Level:* {{ $json.riskLevel }}  |  *Total Alerts:* {{ $json.stats.total_alerts_24h }}  |  *Critical:* {{ $json.stats.critical_alerts_24h }}  |  *Active Incidents:* {{ $json.stats.active_incidents }}\" } },\n    { \"type\": \"divider\" },\n    { \"type\": \"section\", \"text\": { \"type\": \"mrkdwn\", \"text\": \"{{ $json.report }}\" } },\n    { \"type\": \"divider\" },\n    { \"type\": \"context\", \"elements\": [{ \"type\": \"mrkdwn\", \"text\": \"Generated by CyberSentinel AI + Claude  |  {{ $json.date }}\" }] }\n  ]\n}"
+      },
+      "id": "send-slack-report",
+      "name": "Slack: Post SOC Report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1340,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "cybersentinel@{{ $env.SMTP_USER.split('@')[1] }}",
+        "toEmail": "={{ $env.SOC_EMAIL }}",
+        "subject": "=[{{ $json.riskLevel }}] CyberSentinel Daily SOC Report \u2014 {{ $json.date }}",
+        "emailType": "html",
+        "message": "=<html><body style='font-family: Arial; max-width: 800px; margin: 0 auto; padding: 20px;'><div style='background: #0D1B2A; color: white; padding: 20px; border-radius: 8px 8px 0 0;'><h1 style='margin: 0; color: #4FC3F7;'>\ud83d\udee1\ufe0f CyberSentinel AI</h1><p style='color: #B0BEC5; margin: 5px 0 0;'>Daily SOC Intelligence Report \u2014 {{ $json.date }}</p></div><div style='background: #F5F5F5; padding: 20px; border-radius: 0 0 8px 8px;'><div style='background: white; padding: 15px; border-radius: 6px; margin-bottom: 15px; border-left: 4px solid #1565C0;'><h3 style='color: #1565C0; margin-top: 0;'>Risk Level: {{ $json.riskLevel }}</h3><p><strong>Total Alerts (24h):</strong> {{ $json.stats.total_alerts_24h }} | <strong>Critical:</strong> {{ $json.stats.critical_alerts_24h }} | <strong>Active Incidents:</strong> {{ $json.stats.active_incidents }}</p></div><div style='background: white; padding: 15px; border-radius: 6px; white-space: pre-wrap;'>{{ $json.report }}</div></div></body></html>"
+      },
+      "id": "send-email-report",
+      "name": "Email: SOC Report to Team",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.TEAMS_WEBHOOK_URL }}",
+        "method": "POST",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"@type\": \"MessageCard\",\n  \"@context\": \"http://schema.org/extensions\",\n  \"themeColor\": \"1565C0\",\n  \"summary\": \"CyberSentinel Daily SOC Report\",\n  \"sections\": [{\n    \"activityTitle\": \"\ud83d\udcca Daily SOC Report \u2014 {{ $json.date }}\",\n    \"activitySubtitle\": \"Risk Level: {{ $json.riskLevel }}\",\n    \"facts\": [\n      { \"name\": \"Total Alerts (24h)\", \"value\": \"{{ $json.stats.total_alerts_24h }}\" },\n      { \"name\": \"Critical\", \"value\": \"{{ $json.stats.critical_alerts_24h }}\" },\n      { \"name\": \"Active Incidents\", \"value\": \"{{ $json.stats.active_incidents }}\" },\n      { \"name\": \"Unique IPs\", \"value\": \"{{ $json.stats.unique_ips_seen }}\" }\n    ],\n    \"text\": \"{{ $json.report.replace(/\\n/g, '<br>') }}\"\n  }]\n}"
+      },
+      "id": "teams-report",
+      "name": "Teams: Post SOC Report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1340,
+        680
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule: 7AM Mon\u2013Fri": {
+      "main": [
+        [
+          {
+            "node": "Authenticate API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Authenticate API": {
+      "main": [
+        [
+          {
+            "node": "Fetch Dashboard Stats",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Top Critical Alerts",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Open Incidents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Dashboard Stats": {
+      "main": [
+        [
+          {
+            "node": "Claude AI: Generate Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Top Critical Alerts": {
+      "main": [
+        [
+          {
+            "node": "Claude AI: Generate Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Open Incidents": {
+      "main": [
+        [
+          {
+            "node": "Claude AI: Generate Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude AI: Generate Report": {
+      "main": [
+        [
+          {
+            "node": "Build Report Package",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Report Package": {
+      "main": [
+        [
+          {
+            "node": "Slack: Post SOC Report",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Email: SOC Report to Team",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Teams: Post SOC Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    "cybersentinel",
+    "reporting",
+    "scheduled",
+    "production"
+  ]
+}

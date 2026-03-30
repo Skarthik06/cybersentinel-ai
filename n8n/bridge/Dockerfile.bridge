@@ -1,0 +1,12 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    aiokafka==0.10.0 \
+    httpx==0.26.0 \
+    redis[asyncio]==5.0.1
+
+COPY n8n/bridge/kafka_bridge.py .
+
+CMD ["python", "-u", "kafka_bridge.py"]

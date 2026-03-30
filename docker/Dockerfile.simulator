@@ -1,0 +1,9 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir aiokafka==0.10.0
+
+COPY src/simulation/traffic_simulator.py src/simulation/traffic_simulator.py
+
+CMD ["python", "-u", "src/simulation/traffic_simulator.py"]

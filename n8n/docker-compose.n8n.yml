@@ -1,0 +1,140 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CyberSentinel AI — n8n SOAR Extension
+# Extends the main docker-compose.yml with n8n workflow automation engine.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f n8n/docker-compose.n8n.yml up -d
+# ─────────────────────────────────────────────────────────────────────────────
+
+networks:
+  cybersentinel-net:
+    external: true
+
+volumes:
+  n8n_data:
+  n8n_postgres_data:
+
+services:
+
+  # ─────────────────────────────────────────
+  # n8n Workflow Automation Engine
+  # ─────────────────────────────────────────
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: cybersentinel-n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      # Core
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: http://${N8N_HOST:-localhost}:5678/
+
+      # Database (dedicated Postgres for n8n)
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: n8n-postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: n8n
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
+
+      # Auth
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_USER:-admin}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_PASSWORD}
+
+      # Execution
+      EXECUTIONS_PROCESS: main
+      EXECUTIONS_DATA_SAVE_ON_ERROR: all
+      EXECUTIONS_DATA_SAVE_ON_SUCCESS: all
+      EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS: "true"
+      EXECUTIONS_DATA_MAX_AGE: 336        # 14 days retention
+      N8N_METRICS: "true"
+
+      # Security
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+
+      # CyberSentinel integration env vars (passed to workflows)
+      CYBERSENTINEL_API_URL: http://cybersentinel-api:8080
+      CYBERSENTINEL_JWT_SECRET: ${JWT_SECRET}
+      POSTGRES_URL: postgresql://sentinel:${POSTGRES_PASSWORD}@postgres:5432/cybersentinel
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+
+      # External integrations
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK:-}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      PAGERDUTY_API_KEY: ${PAGERDUTY_API_KEY:-}
+      JIRA_BASE_URL: ${JIRA_BASE_URL:-}
+      JIRA_EMAIL: ${JIRA_EMAIL:-}
+      JIRA_API_TOKEN: ${JIRA_API_TOKEN:-}
+      SERVICENOW_BASE_URL: ${SERVICENOW_BASE_URL:-}
+      SERVICENOW_USER: ${SERVICENOW_USER:-}
+      SERVICENOW_PASSWORD: ${SERVICENOW_PASSWORD:-}
+      TEAMS_WEBHOOK_URL: ${TEAMS_WEBHOOK_URL:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SOC_EMAIL: ${SOC_EMAIL:-soc@cybersentinel.ai}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n/workflows:/home/node/.n8n/workflows:ro   # Pre-load workflows
+      - ./n8n/credentials:/home/node/.n8n/credentials:ro
+    networks: [cybersentinel-net]
+    depends_on:
+      n8n-postgres:
+        condition: service_healthy
+      cybersentinel-api:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:5678/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─────────────────────────────────────────
+  # Dedicated PostgreSQL for n8n
+  # ─────────────────────────────────────────
+  n8n-postgres:
+    image: postgres:15-alpine
+    container_name: cybersentinel-n8n-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: n8n
+      POSTGRES_USER: n8n
+      POSTGRES_PASSWORD: ${N8N_DB_PASSWORD}
+    volumes:
+      - n8n_postgres_data:/var/lib/postgresql/data
+    networks: [cybersentinel-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U n8n -d n8n"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # n8n Webhook Bridge
+  # Lightweight FastAPI service that bridges Kafka → n8n webhooks
+  # (n8n doesn't natively consume Kafka, so this adapter translates)
+  # ─────────────────────────────────────────
+  n8n-kafka-bridge:
+    build:
+      context: ..
+      dockerfile: n8n/Dockerfile.bridge
+    container_name: cybersentinel-n8n-bridge
+    restart: unless-stopped
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      N8N_WEBHOOK_BASE: http://n8n:5678/webhook
+      N8N_WEBHOOK_SECRET: ${N8N_WEBHOOK_SECRET}
+    networks: [cybersentinel-net]
+    depends_on: [n8n]
