@@ -123,6 +123,13 @@ services:
       KAFKA_BOOTSTRAP: localhost:9092
       REDIS_URL: redis://:${REDIS_PASSWORD}@localhost:6379
       POSTGRES_URL: postgresql://sentinel:${POSTGRES_PASSWORD}@localhost:5432/cybersentinel
+      # auto = DPI sensor will enumerate interfaces and pick the physical adapter
+      # (eth0 / Ethernet in WSL2 mirrored mode = Windows host physical NIC)
+      CAPTURE_INTERFACE: "auto"
+      # Exclude Docker-internal and WSL2 virtual traffic — keep real host network traffic
+      # 192.168.65.0/24 = Docker Desktop management
+      # 172.17-21.0.0/16 = Docker bridge networks (container-to-container)
+      BPF_FILTER: "ip and not (net 192.168.65.0/24) and not (net 172.17.0.0/16 or net 172.18.0.0/16 or net 172.19.0.0/16 or net 172.20.0.0/16 or net 172.21.0.0/16)"
     restart: unless-stopped
     depends_on:
       kafka:
@@ -141,6 +148,10 @@ services:
       CHROMA_URL: http://chromadb:8000
       CHROMA_TOKEN: ${CHROMA_TOKEN}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+      # Threshold tuned to all-MiniLM-L6-v2 score range for behavioral profiles vs threat sigs
+      # Measured similarity for known-bad profiles: 0.43–0.55 → threshold set to 0.40
+      RLM_ANOMALY_THRESHOLD: "0.40"
+      RLM_THREAT_MATCH_THRESHOLD: "0.35"
     networks: [cybersentinel-net]
     depends_on:
       kafka:

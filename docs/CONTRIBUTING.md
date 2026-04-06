@@ -71,7 +71,7 @@ src/
 │   └── constants.py # Add new severity levels, alert types, MITRE IDs here
 │
 ├── dpi/            # Packet capture — runs in Docker host network mode
-│   ├── sensor.py   # Main capture loop — writes to raw-packets AND threat-alerts
+│   ├── sensor.py   # Main capture loop — writes to raw-packets (Npcap required on Windows)
 │   ├── detectors.py # ADD NEW DETECTORS HERE — pure functions, no side effects
 │   └── publisher.py # Kafka publish helpers
 │
@@ -80,9 +80,10 @@ src/
 │   ├── profile.py      # BehaviorProfile — add new EMA fields here
 │   └── signatures.py   # ADD NEW THREAT SIGNATURES HERE — just add to the list
 │
-├── simulation/     # Traffic simulator — bypasses DPI and RLM entirely
-│   └── traffic_simulator.py  # Writes to threat-alerts only
-│   # IMPORTANT: Simulator events DO NOT update behavior_profiles
+├── simulation/     # Traffic simulator — full DPI pipeline (v1.2+)
+│   └── traffic_simulator.py  # Writes bursts of PacketEvents to raw-packets
+│   # Simulator events NOW go through the full RLM pipeline
+│   # Each scenario generates 30–150 PacketEvent dicts per burst
 │   # See docs/PIPELINES.md for the full explanation
 │
 ├── agents/         # LLM agents — 1-call pipeline, NOT agentic loop
@@ -99,6 +100,8 @@ src/
 └── api/            # FastAPI REST gateway
     ├── gateway.py   # 11 routes — add new endpoints here
     ├── auth.py      # JWT helpers — use get_current_user() dependency
+    ├── gateway.py   # 19 routes — add new endpoints here
+    ├── auth.py      # JWT helpers — use get_current_user() dependency
     └── schemas.py   # Pydantic models — add new request/response models here
 ```
 
@@ -108,16 +111,17 @@ src/
 
 Before contributing to detection or profiling code, read `docs/PIPELINES.md`. In summary:
 
-**Real DPI path:** `sensor.py` → `raw-packets` (Kafka) → `rlm_engine._consume_packets()` → `behavior_profiles` populated
+**Real DPI path:** `sensor.py` → `raw-packets` (Kafka) → `rlm_engine._consume_packets()` → `behavior_profiles` populated → `threat-alerts` → `mcp_orchestrator`
 
-**Simulator path:** `traffic_simulator.py` → `threat-alerts` (Kafka) → `mcp_orchestrator` → `alerts` + `incidents` populated
+**Simulator path (v1.2):** `traffic_simulator.py` → `raw-packets` (Kafka) → `rlm_engine._consume_packets()` → `behavior_profiles` populated → `threat-alerts` → `mcp_orchestrator`
 
-**The simulator NEVER writes to `raw-packets`. The RLM engine NEVER reads from `threat-alerts`.** These are two entirely separate flows. Any code that tries to bridge them (e.g. have the simulator also write to `raw-packets`) would break the architectural separation.
+Both pipelines now merge at `raw-packets`. The simulator generates **burst of 30–150 PacketEvent dicts** per scenario to ensure the RLM engine can build a meaningful behavioral profile (the min_observations gate requires 20+ packets).
 
 When writing tests:
-- Unit tests for detection/profiling: use DPI path mocks
-- Unit tests for AI investigation: use simulator-style dicts directly
+- Unit tests for detection/profiling: use PacketEvent dict mocks (matching simulator format)
+- Unit tests for AI investigation: inject directly into the alert queue
 - Integration tests: be explicit about which pipeline you're testing
+- For real DPI testing: Npcap must be installed — see `docs/LIVE_DPI_SETUP.md`
 
 ---
 

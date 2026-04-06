@@ -17,12 +17,88 @@ from typing import Optional
 
 import redis.asyncio as aioredis
 from aiokafka import AIOKafkaProducer
-from scapy.all import AsyncSniffer, IP, TCP, UDP, DNS, Raw, ICMP, sniff
+from scapy.all import AsyncSniffer, IP, TCP, UDP, DNS, Raw, ICMP, sniff, get_if_list, conf
 from scapy.layers.http import HTTP, HTTPRequest, HTTPResponse
 from scapy.layers.tls.all import TLS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [DPI] %(levelname)s: %(message)s")
 logger = logging.getLogger("dpi-sensor")
+
+
+def _detect_capture_interface() -> str:
+    """
+    Auto-detect the best physical interface for packet capture.
+
+    On Windows (Npcap): uses conf.ifaces descriptions to find the physical
+    Ethernet/Wi-Fi adapter by description keywords, skipping Hyper-V, WSL,
+    loopback, and other virtual adapters.
+
+    On Linux (Docker/WSL2): uses interface name prefixes to find eth0/ens/etc.
+    """
+    import sys
+    available = get_if_list()
+    logger.info(f"Available interfaces: {available}")
+
+    if sys.platform == "win32":
+        # Windows with Npcap — interface names are \Device\NPF_{GUID}
+        # conf.ifaces maps these to human-readable descriptions
+        # Descriptions to always skip — virtual, wireless, loopback
+        skip_desc = ("loopback", "hyper-v", "wsl", "virtual", "docker",
+                     "vmware", "vpn", "vethernet", "miniport", "ndis",
+                     "wireless", "wi-fi", "wifi", "802.11", "wlan")
+        # Wired-only keywords — prioritised over generic brand names
+        wired_keywords = ("gbe", "gigabit", "pcie", "pci express",
+                          "ethernet controller", "ethernet adapter",
+                          "network adapter", "lan", "realtek pcie",
+                          "intel ethernet", "broadcom netxtreme")
+        try:
+            candidates_win = {}
+            for iface_id, iface_obj in conf.ifaces.items():
+                desc = (getattr(iface_obj, "description", "") or
+                        getattr(iface_obj, "name", "") or "").lower()
+                if any(s in desc for s in skip_desc):
+                    continue
+                candidates_win[iface_id] = desc
+
+            # First pass — prefer clearly wired adapters
+            for iface_id, desc in candidates_win.items():
+                if any(k in desc for k in wired_keywords):
+                    logger.info(f"Auto-selected Windows adapter: {iface_id} ({desc})")
+                    return iface_id
+
+            # Second pass — any non-skipped adapter
+            if candidates_win:
+                iface_id = next(iter(candidates_win))
+                logger.info(f"Auto-selected Windows adapter (2nd pass): {iface_id} ({candidates_win[iface_id]})")
+                return iface_id
+        except Exception as e:
+            logger.warning(f"Windows iface detection via conf.ifaces failed: {e}")
+
+        # Fallback: pick first non-loopback NPF interface
+        for iface in available:
+            if "Loopback" not in iface:
+                logger.info(f"Auto-selected Windows adapter (fallback): {iface}")
+                return iface
+
+    # Linux path — eth0/ens/enp/etc.
+    skip_prefixes = ("lo", "br-", "veth", "docker", "virbr", "vmnet", "dummy")
+    preferred     = ("eth0", "Ethernet", "en0", "ens", "enp", "eno", "em")
+    candidates    = [i for i in available
+                     if not any(i.lower().startswith(p) for p in skip_prefixes)]
+
+    for pref in preferred:
+        for iface in candidates:
+            if iface.lower().startswith(pref.lower()):
+                logger.info(f"Auto-selected interface: {iface}")
+                return iface
+
+    if candidates:
+        logger.info(f"Auto-selected interface (fallback): {candidates[0]}")
+        return candidates[0]
+
+    fallback = str(conf.iface)
+    logger.warning(f"No suitable interface found — using Scapy default: {fallback}")
+    return fallback
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
@@ -63,6 +139,7 @@ class PacketEvent:
     is_suspicious: bool
     suspicion_reasons: list
     session_id: str
+    source: str = "dpi"
 
 
 def calculate_entropy(data: bytes) -> float:
@@ -217,7 +294,8 @@ class DPISensor:
         self.redis: Optional[aioredis.Redis] = None
         self.packet_count = 0
         self.alert_count = 0
-        self.interface = os.getenv("CAPTURE_INTERFACE", "eth0")
+        _iface_cfg = os.getenv("CAPTURE_INTERFACE", "auto")
+        self.interface = _detect_capture_interface() if _iface_cfg == "auto" else _iface_cfg
         self.bpf_filter = os.getenv("BPF_FILTER", "ip")
 
     async def start(self):

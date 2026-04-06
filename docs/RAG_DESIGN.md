@@ -12,7 +12,7 @@ CyberSentinel AI uses RAG not for question-answering in the traditional sense, b
 
 This enables the system to detect novel attack variants that signature-based tools would miss: a new C2 beacon protocol will still score high similarity to the C2 beacon threat signature because the *behavioral description* (regular intervals, high entropy, unusual port) matches semantically, not literally.
 
-**Critical note on pipeline separation:** The RAG pipeline has two distinct consumers. The RLM engine queries ChromaDB with real host behavioral profiles built from live packet capture. The MCP Orchestrator queries ChromaDB with alert context for AI investigations. Both use the same embedding model and collections — but only the RLM engine populates the `behavior_profiles` collection, and it only does so from real DPI data (`raw-packets` Kafka topic). The traffic simulator never populates ChromaDB — it bypasses both DPI and RLM entirely.
+**Pipeline note (v1.2):** The RAG pipeline has two distinct consumers. The RLM engine queries ChromaDB with host behavioral profiles and populates the `behavior_profiles` collection. The MCP Orchestrator queries ChromaDB with alert context for AI investigations. Both use the same embedding model and collections. From v1.2, the traffic simulator feeds the full DPI pipeline via `raw-packets` — so the RLM engine processes simulator bursts and populates `behavior_profiles` for simulator IPs too. Only hosts seen exclusively via external CTI (not through raw packets) will have empty profiles.
 
 ---
 

@@ -139,8 +139,8 @@ graph TB
     DETECT --> PUB
     PUB --> KRP
 
-    %% Simulator Pipeline
-    SIM --> KTA
+    %% Simulator Pipeline (v1.2 — full DPI pipeline, same as real DPI)
+    SIM --> KRP
 
     %% RLM Engine
     KRP --> RLM
@@ -350,68 +350,77 @@ flowchart TD
 
 ## 6. Pipeline 2 — Traffic Simulator
 
-This pipeline generates realistic synthetic threats for testing and training without live network traffic. It **completely bypasses** the DPI and RLM layers.
+> **v1.2 update:** The simulator now feeds the **full DPI pipeline** via `raw-packets`. It no longer bypasses RLM. Both pipelines are identical from the Kafka layer onwards.
 
 ```mermaid
 flowchart TD
-    A["🎭 traffic_simulator.py\nService: traffic-simulator\nInterval: 30s between events"]
+    A["🎭 traffic_simulator.py\nService: traffic-simulator\n17 scenarios, 2 events/min default"]
 
     A --> B["🎲 Weighted Scenario Selection\nrandom.choices() with weights"]
 
-    B --> C["Scenario functions:\n① c2_beacon_scenario()\n② lateral_movement_scenario()\n③ data_exfil_scenario()\n④ port_scan_scenario()\n⑤ ransomware_scenario()\n⑥ credential_dump_scenario()\n⑦ dns_tunneling_scenario()\n⑧ tor_usage_scenario()\n⑨ insider_threat_scenario()\n⑩ supply_chain_scenario()\n⑪ ddos_scenario()\n⑫ zero_day_scenario()"]
+    B --> C["Generate BURST of 30–150\nraw PacketEvent dicts\nper scenario\n(clears RLM min_observations gate)"]
 
-    C --> D["Build alert JSON:\n{\n  type: scenario_type,\n  src_ip: random from INTERNAL_IPS,\n  dst_ip: random from EXTERNAL_IPS,\n  severity: scenario_severity,\n  mitre_technique: T-ID,\n  description: generated text,\n  timestamp: utcnow()\n}"]
+    C --> D["PacketEvent fields:\nsrc_ip, dst_ip, ports, protocol\npayload_size, entropy, flags\nhas_tls, is_suspicious\nsuspicion_reasons, session_id"]
 
-    D -->|Direct write| E["📨 Kafka\nthreat-alerts topic\nNO raw-packets written"]
+    D -->|Burst write| E["📨 Kafka\nraw-packets topic\n(SAME as real DPI sensor)"]
 
-    E -->|Consumer| F["🤖 mcp_orchestrator.py\n_consume_alerts()"]
+    E -->|Consumer| F["🧠 rlm_engine.py\n_consume_packets()\nEMA profiling per src_ip"]
 
-    F --> G["Parallel tool execution\nasyncio.gather()"]
+    F --> G["chromadb cosine similarity\nbehavior_profiles vs threat_signatures"]
 
-    G --> H1["query_threat_database()\nChromaDB lookup"]
-    G --> H2["get_host_profile()\nReturns empty/zeros\n⚠️ Not in behavior_profiles"]
-    G --> H3["get_recent_alerts()\nPostgreSQL query"]
-    G --> H4["lookup_ip_reputation()\nAbuseIPDB API call"]
+    G -->|anomaly_score ≥ 0.40| H["📨 Kafka\nthreat-alerts topic"]
 
-    H1 & H2 & H3 & H4 --> I["Single LLM API call\nProvider: Claude/GPT-4o mini\ntools=None\nmax_tokens=1024"]
+    H --> I["🤖 mcp_orchestrator.py\n_consume_alerts()"]
 
-    I --> J["AI verdict:\n- severity_confirmed\n- block_recommended\n- mitre_technique\n- investigation_summary"]
+    I --> J["asyncio.gather()\n4 tools in parallel"]
 
-    J --> K["💾 PostgreSQL upsert\nalerts table +\nincidents table\nwith block_recommended flag"]
+    J --> K1["query_threat_database()\nChromaDB lookup"]
+    J --> K2["get_host_profile()\nReturns REAL profile\nbuilt by RLM from burst"]
+    J --> K3["get_recent_alerts()\nPostgreSQL query"]
+    J --> K4["lookup_ip_reputation()\nAbuseIPDB API call"]
 
-    subgraph BYPASS["⚠️ Layers Bypassed by Simulator"]
-        NIC["❌ Network Interface"]
-        SENSOR["❌ sensor.py"]
-        DETECT["❌ detectors.py"]
-        RLM["❌ rlm_engine.py"]
-        BP["❌ behavior_profiles\nChromaDB collection"]
-        RP["❌ raw-packets\nKafka topic"]
-    end
+    K1 & K2 & K3 & K4 --> L["Single LLM API call\nProvider: GPT-4o mini default\ntools=None, max_tokens=1024"]
+
+    L --> M["Structured 4-part verdict:\nOBSERVED / WHY SUSPICIOUS\nTHREAT ASSESSMENT / ATTACKER PROFILE\n+ block_recommended (CRITICAL/HIGH → true)"]
+
+    M --> N["💾 PostgreSQL\nalerts + incidents tables\nblock_recommended for CRITICAL/HIGH"]
 
     style A fill:#e67e22,color:#fff
     style E fill:#ff6b35,color:#fff
-    style F fill:#7b68ee,color:#fff
-    style I fill:#7b68ee,color:#fff
-    style K fill:#4a90d9,color:#fff
-    style BYPASS fill:#ffebee,stroke:#e74c3c
+    style H fill:#ff6b35,color:#fff
+    style F fill:#2ecc71,color:#fff
+    style L fill:#7b68ee,color:#fff
+    style N fill:#4a90d9,color:#fff
 ```
 
 ### Simulator Scenario Reference
 
-| Scenario | MITRE ID | Severity | Weight | Typical IPs |
-|----------|----------|----------|--------|------------|
-| C2 Beacon | T1071.001 | CRITICAL | 15% | Internal → External |
-| Lateral Movement | T1021.002 | HIGH | 12% | Internal → Internal |
-| Data Exfiltration | T1048 | CRITICAL | 12% | Internal → External |
-| Port Scan | T1046 | MEDIUM | 10% | Internal → Any |
-| Ransomware Staging | T1486 | CRITICAL | 8% | Internal → Internal |
-| Credential Dumping | T1003 | HIGH | 8% | Internal → Internal |
-| DNS Tunneling | T1568.002 | HIGH | 8% | Internal → External |
-| Tor Usage | T1090.003 | HIGH | 7% | Internal → Tor exit |
-| Insider Threat | T1078 | HIGH | 7% | Internal → External |
-| Supply Chain | T1195 | CRITICAL | 5% | External → Internal |
-| DDoS | T1499 | HIGH | 5% | External → Internal |
-| Zero Day | T1190 | CRITICAL | 3% | External → Internal |
+#### MITRE ATT&CK Mapped (12)
+
+| Scenario | MITRE ID | Severity | Weight | Packets/Burst |
+|----------|----------|----------|--------|--------------|
+| C2 Beacon | T1071.001 | CRITICAL | 5 | ~60 |
+| Data Exfiltration | T1048.003 | HIGH | 4 | ~80 |
+| Lateral Movement SMB | T1021.002 | HIGH | 3 | ~50 |
+| Port Scan | T1046 | MEDIUM | 2 | ~150 |
+| DNS Tunneling | T1071.004 | HIGH | 3 | ~100 |
+| Brute Force SSH | T1110.001 | HIGH | 3 | ~120 |
+| RDP Lateral Movement | T1021.001 | HIGH | 3 | ~45 |
+| Exploit Public App | T1190 | CRITICAL | 4 | ~30 |
+| High Entropy Payload | T1027 | HIGH | 3 | ~40 |
+| Protocol Tunneling | T1572 | HIGH | 3 | ~60 |
+| Credential Spray | T1110.003 | HIGH | 3 | ~90 |
+| Reverse Shell | T1059.004 | CRITICAL | 4 | ~45 |
+
+#### Unknown Novel Threats — AI Must Classify (5)
+
+| Scenario | Type | Severity | Description |
+|----------|------|----------|-------------|
+| Polymorphic Beacon | POLYMORPHIC_BEACON | HIGH | Intervals mutate to evade timing detection |
+| Covert Storage Channel | COVERT_STORAGE_CHANNEL | HIGH | Data in IP header reserved/ToS fields |
+| Slow-Drip Exfil | SLOW_DRIP_EXFIL | HIGH | 1-2 bytes/pkt over thousands of sessions |
+| Mesh C2 Relay | MESH_C2_RELAY | CRITICAL | Multi-hop internal relay, no direct ext contact |
+| Synthetic Idle | SYNTHETIC_IDLE_TRAFFIC | MEDIUM | Mimics legitimate traffic, statistically wrong |
 
 ---
 
@@ -429,15 +438,15 @@ graph LR
         P1D --> P1I["avg_entropy ✅"]
     end
 
-    subgraph SIM_PATH["Pipeline 2: Traffic Simulator"]
+    subgraph SIM_PATH["Pipeline 2: Traffic Simulator (v1.2 — Full Pipeline)"]
         direction TB
-        P2A["traffic_simulator.py"] --> P2B["threat-alerts\nKafka DIRECT"]
-        P2B --> P2C["mcp_orchestrator.py"]
-        P2C --> P2D["behavior_profiles\nChromaDB ❌ EMPTY"]
-        P2C --> P2E["anomaly_score = 0 ⚠️"]
-        P2C --> P2F["observation_count = 0 ⚠️"]
-        P2C --> P2G["avg_bytes_per_min = 0 ⚠️"]
-        P2C --> P2H["avg_entropy = 0 ⚠️"]
+        P2A["traffic_simulator.py"] --> P2B["raw-packets\nKafka (burst 30–150 pkts)"]
+        P2B --> P2C["rlm_engine.py\nEMA profiling"]
+        P2C --> P2D["behavior_profiles\nChromaDB ✅"]
+        P2C --> P2E["anomaly_score ✅ Real"]
+        P2C --> P2F["observation_count ✅ Real"]
+        P2C --> P2G["avg_bytes_per_min ✅ Real"]
+        P2C --> P2H["avg_entropy ✅ Real"]
     end
 
     subgraph SHARED["Shared (Both Pipelines)"]
@@ -454,22 +463,25 @@ graph LR
     style SHARED fill:#e8eaf6,stroke:#7b68ee
 ```
 
-### Data Gap Summary Table
+### Data Comparison Table (v1.2)
 
-| Data Field | DPI Pipeline | Simulator Pipeline | Why |
-|-----------|-------------|-------------------|-----|
-| `anomaly_score` | ✅ Real value (0–1) | ❌ Always 0 | RLM only reads `raw-packets` |
-| `observation_count` | ✅ Packet count | ❌ Always 0 | RLM never sees simulator IPs |
-| `avg_bytes_per_min` | ✅ EMA average | ❌ Always 0 | EMA not updated without packets |
-| `avg_entropy` | ✅ EMA average | ❌ Always 0 | EMA not updated without packets |
-| `profile_text` | ✅ Rich description | ❌ "PROFILED" default | No RLM profile text |
-| `behavior_profiles` (ChromaDB) | ✅ Populated | ❌ Empty | RLM never writes |
-| `investigation_summary` | ✅ Full AI analysis | ✅ Full AI analysis | MCP runs for both |
-| `block_recommended` | ✅ AI verdict | ✅ AI verdict | MCP runs for both |
-| `mitre_technique` | ✅ Detected | ✅ Injected by scenario | Both paths set it |
-| `cve_database` query | ✅ Available | ✅ Available | Both pipelines use it |
-| `cti_reports` query | ✅ Available | ✅ Available | Both pipelines use it |
-| `AbuseIPDB` reputation | ✅ Available | ✅ Available | Both pipelines use it |
+> Both pipelines now feed through RLM. The key difference is packet origin: real DPI captures genuine network bytes; the simulator generates scenario-realistic packet bursts.
+
+| Data Field | DPI Pipeline | Simulator Pipeline (v1.2) |
+|-----------|-------------|--------------------------|
+| `anomaly_score` | ✅ Real (genuine traffic) | ✅ Real (scenario burst through RLM) |
+| `observation_count` | ✅ Real packet count | ✅ Burst count (30–150 per scenario) |
+| `avg_bytes_per_min` | ✅ EMA (real bytes) | ✅ EMA (scenario-realistic values) |
+| `avg_entropy` | ✅ EMA (real payloads) | ✅ EMA (scenario entropy values) |
+| `profile_text` | ✅ Rich description | ✅ Built from scenario burst |
+| `behavior_profiles` (ChromaDB) | ✅ Populated | ✅ Populated |
+| `investigation_summary` | ✅ Structured 4-part analysis | ✅ Structured 4-part analysis |
+| `block_recommended` | ✅ AI verdict (CRITICAL/HIGH→true) | ✅ AI verdict (CRITICAL/HIGH→true) |
+| `mitre_technique` | ✅ Detected by DPI | ✅ Scenario-defined |
+| `cve_database` query | ✅ Available | ✅ Available |
+| `cti_reports` query | ✅ Available | ✅ Available |
+| `AbuseIPDB` reputation | ✅ Available | ✅ Available |
+| Raw packet bytes (pcap) | ✅ Real network bytes | ❌ Not captured (no interface) |
 
 ---
 

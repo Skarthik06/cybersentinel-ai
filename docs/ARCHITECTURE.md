@@ -67,52 +67,61 @@ Real Network Traffic (physical or virtual NIC)
 
 ### Pipeline 2 — Traffic Simulator Path (Testing & Demo)
 
-This path tests the AI investigation and response pipeline without requiring real network traffic or Npcap.
+> **v1.2 update:** The simulator now feeds the full DPI pipeline via `raw-packets`. Behavioral profiles are built by the RLM engine for all simulated IPs.
 
 ```
 src/simulation/traffic_simulator.py
     │
-    ├── 12 scenario functions (pure Python dicts, no packets):
-    │   ├── scenario_c2_beacon()              → CRITICAL
-    │   ├── scenario_reverse_shell()          → CRITICAL
-    │   ├── scenario_exploit_public_app()     → CRITICAL
-    │   ├── scenario_data_exfiltration()      → HIGH
-    │   ├── scenario_lateral_movement()       → HIGH
-    │   ├── scenario_dns_tunneling()          → HIGH
-    │   ├── scenario_brute_force_ssh()        → HIGH
-    │   ├── scenario_rdp_lateral_movement()   → HIGH
-    │   ├── scenario_high_entropy_payload()   → HIGH
-    │   ├── scenario_protocol_tunneling()     → HIGH
-    │   ├── scenario_credential_spray()       → HIGH
-    │   └── scenario_port_scan()              → MEDIUM
+    ├── 17 scenario functions (12 MITRE-mapped + 5 unknown novel threats):
+    │   ├── scenario_c2_beacon()              → CRITICAL   (burst ~60 pkts)
+    │   ├── scenario_reverse_shell()          → CRITICAL   (burst ~45 pkts)
+    │   ├── scenario_exploit_public_app()     → CRITICAL   (burst ~30 pkts)
+    │   ├── scenario_data_exfiltration()      → HIGH       (burst ~80 pkts)
+    │   ├── scenario_lateral_movement()       → HIGH       (burst ~50 pkts)
+    │   ├── scenario_dns_tunneling()          → HIGH       (burst ~100 pkts)
+    │   ├── scenario_brute_force_ssh()        → HIGH       (burst ~120 pkts)
+    │   ├── scenario_rdp_lateral_movement()   → HIGH       (burst ~45 pkts)
+    │   ├── scenario_high_entropy_payload()   → HIGH       (burst ~40 pkts)
+    │   ├── scenario_protocol_tunneling()     → HIGH       (burst ~60 pkts)
+    │   ├── scenario_credential_spray()       → HIGH       (burst ~90 pkts)
+    │   ├── scenario_port_scan()              → MEDIUM     (burst ~150 pkts)
+    │   ├── POLYMORPHIC_BEACON                → HIGH       (unknown, no MITRE)
+    │   ├── COVERT_STORAGE_CHANNEL            → HIGH       (unknown, no MITRE)
+    │   ├── SLOW_DRIP_EXFIL                   → HIGH       (unknown, no MITRE)
+    │   ├── MESH_C2_RELAY                     → CRITICAL   (unknown, no MITRE)
+    │   └── SYNTHETIC_IDLE_TRAFFIC            → MEDIUM     (unknown, no MITRE)
     │
-    ▼ Kafka: "threat-alerts"   ← DIRECTLY, skips "raw-packets" entirely
+    ▼ Kafka: "raw-packets"   ← burst of 30–150 PacketEvent dicts per scenario
+    │
+    ▼ rlm_engine._consume_packets()   ← SAME pipeline as real DPI
+    │   └── EMA profiling, ChromaDB scoring, anomaly detection
+    │
+    ▼ Kafka: "threat-alerts"   ← only when anomaly_score > 0.40
     │
     ▼ mcp_orchestrator._consume_alerts()
     │
     RESULT: alerts table ← POPULATED
             incidents table ← POPULATED
-            behavior_profiles table ← NOT populated (zeros)
-            packets table ← NOT populated
+            behavior_profiles table ← POPULATED (real EMA values)
+            packets table ← POPULATED (partial — PacketEvent, not raw bytes)
+            ChromaDB behavior_profiles ← POPULATED
 ```
 
-### The Data Gap: What Simulation Skips
+### Pipeline Comparison (v1.2)
 
-| Data | Real DPI | Simulator |
-|------|----------|-----------|
-| `alerts` table | Yes | **Yes** |
-| `incidents` table | Yes | **Yes** |
-| `firewall_rules` table | Yes | **Yes** (via block recommendations) |
-| `packets` table | Yes (every packet) | No |
-| `behavior_profiles.observation_count` | Yes | No (stays 0) |
-| `behavior_profiles.avg_bytes_per_min` | Yes | No (stays 0) |
-| `behavior_profiles.avg_entropy` | Yes | No (stays 0) |
-| `behavior_profiles.anomaly_score` | Yes (ChromaDB computed) | No (stays 0) |
-| `packets_per_minute` continuous aggregate | Yes | No |
-| ChromaDB `behavior_profiles` collection | Yes | No |
-
-**Why behavior_profiles stays zero under simulation:**
-The simulator hardcodes `anomaly_score: 0.83` as a JSON field — but the RLM engine never reads this field. The RLM engine exclusively reads from the `raw-packets` Kafka topic. The simulator writes to `threat-alerts`. These are two different topics. No raw packets = no EMA updates = no ChromaDB scoring = all profile metrics remain 0.
+| Data | Real DPI | Simulator (v1.2) |
+|------|----------|-----------------|
+| `alerts` table | Yes | Yes |
+| `incidents` table | Yes | Yes |
+| `firewall_rules` table | Yes | Yes (via block recommendations) |
+| `packets` table | Yes (every real packet) | Yes (PacketEvent bursts) |
+| `behavior_profiles.observation_count` | Yes (real packet count) | Yes (burst count: 30–150) |
+| `behavior_profiles.avg_bytes_per_min` | Yes (real EMA) | Yes (scenario-realistic EMA) |
+| `behavior_profiles.avg_entropy` | Yes (real EMA) | Yes (scenario entropy EMA) |
+| `behavior_profiles.anomaly_score` | Yes (ChromaDB computed) | Yes (ChromaDB computed) |
+| `packets_per_minute` aggregate | Yes | Yes |
+| ChromaDB `behavior_profiles` collection | Yes | Yes |
+| Raw packet bytes (pcap level) | Yes | No (no physical NIC) |
 
 ---
 
@@ -128,7 +137,7 @@ In parallel, suspicious packets also emit immediately to `threat-alerts` — the
 
 **CTI Scraper** runs five async scrapers on their own schedules (NVD every 4h, CISA every 6h, Abuse.ch every 1h, MITRE every 7d max, OTX every 2h). Each scraper builds structured text from raw CTI data, chunks it if needed, checks the embedding cache, and upserts into ChromaDB. Critical CVEs additionally publish to Kafka `cti-updates` to trigger the n8n CVE pipeline workflow.
 
-**Traffic Simulator** (optional, for testing) generates synthetic threat events at a configurable rate (default 2/min) and publishes directly to `threat-alerts`, bypassing the entire DPI + RLM pipeline. Used when real packet capture is not available.
+**Traffic Simulator** (optional, for testing) generates synthetic threat scenarios at a configurable rate (default 2/min) and publishes **bursts of 30–150 raw PacketEvent dicts to `raw-packets`** — the same topic the DPI sensor uses. This means every simulated scenario passes through the full RLM profiling pipeline. Used when real packet capture is not available (no Npcap, WSL2, CI environments).
 
 ### Layer 2 — Intelligence
 

@@ -205,20 +205,40 @@ function ThreatDot({ color="#E53935", size=7 }) {
 }
 
 function MetricCard({ label, value, sub, color, live, icon }) {
+  const [display, setDisplay] = useState(0);
+  const raf = useRef(null);
+  useEffect(() => {
+    const target = Number(value) || 0;
+    const duration = 600;
+    const start = performance.now();
+    const from = display;
+    cancelAnimationFrame(raf.current);
+    function step(now) {
+      const p = Math.min((now - start) / duration, 1);
+      const ease = 1 - Math.pow(1 - p, 3);
+      setDisplay(Math.round(from + (target - from) * ease));
+      if (p < 1) raf.current = requestAnimationFrame(step);
+    }
+    raf.current = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf.current);
+  }, [value]);
   return (
     <div style={{
-      background:"rgba(13,27,42,0.9)", border:`1px solid ${color}30`,
-      borderRadius:10, padding:"20px 22px",
-      boxShadow:`inset 0 1px 0 ${color}15, 0 4px 20px rgba(0,0,0,0.3)`,
-    }}>
+      background:"rgba(8,18,30,0.82)", backdropFilter:"blur(10px)",
+      border:`1px solid ${color}28`, borderRadius:10, padding:"20px 22px",
+      boxShadow:`inset 0 1px 0 ${color}18, 0 6px 24px rgba(0,0,0,0.4)`,
+      transition:"border-color 0.3s, box-shadow 0.3s",
+    }}
+    onMouseEnter={e=>{ e.currentTarget.style.borderColor=`${color}55`; e.currentTarget.style.boxShadow=`inset 0 1px 0 ${color}25, 0 6px 32px rgba(0,0,0,0.5), 0 0 20px ${color}18`; }}
+    onMouseLeave={e=>{ e.currentTarget.style.borderColor=`${color}28`; e.currentTarget.style.boxShadow=`inset 0 1px 0 ${color}18, 0 6px 24px rgba(0,0,0,0.4)`; }}>
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:12 }}>
         <div style={{ display:"flex", alignItems:"center", gap:6 }}>
           {live && <ThreatDot color={color} size={5}/>}
           <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:9, color:"#546E7A", letterSpacing:2, textTransform:"uppercase" }}>{label}</span>
         </div>
-        <span style={{ fontSize:18, opacity:0.6 }}>{icon}</span>
+        <span style={{ fontSize:18, opacity:0.55 }}>{icon}</span>
       </div>
-      <div style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:34, fontWeight:700, color, lineHeight:1, marginBottom:4 }}>{value}</div>
+      <div className="metric-val" style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:34, fontWeight:700, color, lineHeight:1, marginBottom:4 }}>{display}</div>
       {sub && <div style={{ fontSize:11, color:"#546E7A" }}>{sub}</div>}
     </div>
   );
@@ -226,14 +246,15 @@ function MetricCard({ label, value, sub, color, live, icon }) {
 
 function Panel({ title, badge, children, style={} }) {
   return (
-    <div style={{
-      background:"rgba(13,27,42,0.85)", border:"1px solid rgba(79,195,247,0.1)",
-      borderRadius:10, overflow:"hidden", display:"flex", flexDirection:"column", ...style
+    <div className="dash-panel panel-in" style={{
+      background:"rgba(7,16,27,0.8)", backdropFilter:"blur(12px)",
+      border:"1px solid rgba(79,195,247,0.1)",
+      borderRadius:12, overflow:"hidden", display:"flex", flexDirection:"column", ...style
     }}>
       <div style={{
-        padding:"12px 18px", borderBottom:"1px solid rgba(79,195,247,0.08)",
+        padding:"12px 18px", borderBottom:"1px solid rgba(79,195,247,0.07)",
         display:"flex", alignItems:"center", justifyContent:"space-between",
-        background:"rgba(79,195,247,0.03)",
+        background:"rgba(79,195,247,0.025)",
       }}>
         <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:10, color:"#4FC3F7", letterSpacing:2, textTransform:"uppercase" }}>{title}</span>
         {badge && <span style={{ fontFamily:"monospace", fontSize:10, color:"#546E7A" }}>{badge}</span>}
@@ -260,10 +281,11 @@ const CustomTooltip = ({ active, payload, label }) => {
 // ══════════════════════════════════════════════════════════════════════════
 export default function SOCDashboard() {
   const [tab, setTab] = useState("overview");
+  const [activeMode, setActiveMode] = useState("simulator"); // "simulator" | "dpi"
   const [data, setData] = useState({ dash:MOCK.dashboard, alerts:[], incidents:[] });
   const [apiLive, setApiLive] = useState(false);
   const [timeData, setTimeData] = useState(genTimeData);
-  const [investigationsPaused, setInvestigationsPaused] = useState(false);
+  const [investigationsPaused, setInvestigationsPaused] = useState({ simulator: false, dpi: false });
   const [searchIp, setSearchIp] = useState("");
   const [hostProfile, setHostProfile] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -276,6 +298,9 @@ export default function SOCDashboard() {
   const [authed, setAuthed] = useState(false);
   const [tick, setTick] = useState(0);
   const [selectedIncident, setSelectedIncident] = useState(null);
+  const [feedFilter, setFeedFilter] = useState("ALL");   // severity filter for threat feed
+  const [feedSearch, setFeedSearch] = useState("");       // free-text search for threat feed
+  const [expandedCard, setExpandedCard] = useState(null); // expanded threat card id
   const [incidentDetail, setIncidentDetail] = useState(null);
   const [threatSigs, setThreatSigs] = useState([]);
   const [drawerLoading, setDrawerLoading] = useState(false);
@@ -284,45 +309,127 @@ export default function SOCDashboard() {
   const [generatedRemediation, setGeneratedRemediation] = useState(null);
   const [blockRecs, setBlockRecs] = useState([]);
   const [blockAction, setBlockAction] = useState({});
+  const [firewallRules, setFirewallRules] = useState([]);
+  const [firewallFilter, setFirewallFilter] = useState("all"); // all | active | expired
+  const [unblockAction, setUnblockAction] = useState({});
+  const waterCanvasRef = useRef(null);
+
+  // Water mosaic animation (login screen only)
+  useEffect(() => {
+    if (authed) return;
+    const canvas = waterCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const TILE = 22;
+    let t = 0, animId;
+    const resize = () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; };
+    resize();
+    window.addEventListener('resize', resize);
+    function draw() {
+      t += 0.011;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const cols = Math.ceil(canvas.width / TILE) + 1;
+      const rows = Math.ceil(canvas.height / TILE) + 1;
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const nx = c / cols - 0.5, ny = r / rows - 0.5;
+          const dist = Math.sqrt(nx*nx + ny*ny);
+          const w1 = Math.sin(dist * 13 - t * 2.1);
+          const w2 = Math.sin(nx * 17 + t * 1.7) * Math.cos(ny * 13 - t * 0.85);
+          const w3 = Math.cos((nx - ny) * 15 - t * 1.35);
+          const w4 = Math.sin(dist * 7 + nx * 5 - t * 1.9);
+          const wave = (w1 * 0.35 + w2 * 0.28 + w3 * 0.22 + w4 * 0.15);
+          const v = (wave + 1) / 2;
+          const rr = Math.floor(v * 14);
+          const gg = Math.floor(18 + v * 95);
+          const bb = Math.floor(55 + v * 148);
+          ctx.fillStyle = `rgba(${rr},${gg},${bb},${0.1 + v * 0.25})`;
+          ctx.fillRect(c * TILE, r * TILE, TILE - 2, TILE - 2);
+          if (v > 0.76) {
+            const hi = (v - 0.76) / 0.24;
+            ctx.fillStyle = `rgba(79,195,247,${hi * 0.38})`;
+            ctx.fillRect(c * TILE + 4, r * TILE + 4, TILE - 9, TILE - 9);
+          }
+          if (v < 0.22) {
+            ctx.fillStyle = `rgba(2,8,18,${(0.22 - v) * 0.5})`;
+            ctx.fillRect(c * TILE, r * TILE, TILE - 2, TILE - 2);
+          }
+        }
+      }
+      animId = requestAnimationFrame(draw);
+    }
+    draw();
+    return () => { cancelAnimationFrame(animId); window.removeEventListener('resize', resize); };
+  }, [authed]);
+
+  // Scroll-reveal IntersectionObserver (landing page only)
+  useEffect(() => {
+    if (authed) return;
+    const timer = setTimeout(() => {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(e => {
+          if (e.isIntersecting) {
+            e.target.classList.add('visible');
+            obs.unobserve(e.target);
+          }
+        });
+      }, { threshold: 0.1 });
+      document.querySelectorAll('.sr,.sr-l,.sr-r').forEach(el => obs.observe(el));
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [authed]);
 
   // Live clock
   useEffect(() => { const t = setInterval(()=>setTick(x=>x+1), 1000); return ()=>clearInterval(t); }, []);
 
-  const fetchData = useCallback(async (tok) => {
+  const fetchData = useCallback(async (tok, mode) => {
     const t = tok || token;
+    const m = mode || activeMode;
     if (!t) return;
     const h = { Authorization:`Bearer ${t}` };
     try {
-      const [d, a, i, ctrl] = await Promise.all([
-        fetch(`${API}/api/v1/dashboard`, {headers:h}).then(r=>r.json()),
-        fetch(`${API}/api/v1/alerts?limit=20`, {headers:h}).then(r=>r.json()),
-        fetch(`${API}/api/v1/incidents`, {headers:h}).then(r=>r.json()),
-        fetch(`${API}/api/v1/control`, {headers:h}).then(r=>r.json()).catch(()=>({})),
+      const [d, a, i, ctrlSim, ctrlDpi] = await Promise.all([
+        fetch(`${API}/api/v1/dashboard?source=${m}`, {headers:h}).then(r=>r.json()),
+        fetch(`${API}/api/v1/alerts?limit=1000&source=${m}`, {headers:h}).then(r=>r.json()),
+        fetch(`${API}/api/v1/incidents?limit=500&source=${m}`, {headers:h}).then(r=>r.json()),
+        fetch(`${API}/api/v1/control?source=simulator`, {headers:h}).then(r=>r.json()).catch(()=>({})),
+        fetch(`${API}/api/v1/control?source=dpi`, {headers:h}).then(r=>r.json()).catch(()=>({})),
       ]);
-      // When API is live, always use real data — never fall back to MOCK
       setData({
         dash: d,
         alerts: Array.isArray(a) ? a : [],
         incidents: Array.isArray(i) ? i : [],
       });
-      // Build time chart from real data (zeros if no data yet — not random)
       setTimeData(buildTimeData(d.alerts_by_hour));
-      if (ctrl.investigations_paused !== undefined) setInvestigationsPaused(ctrl.investigations_paused);
+      setInvestigationsPaused({
+        simulator: ctrlSim.investigations_paused ?? false,
+        dpi:       ctrlDpi.investigations_paused ?? false,
+      });
       setApiLive(true);
     } catch { setApiLive(false); }
-  }, [token]);
+  }, [token, activeMode]);
 
   useEffect(() => { if (authed) { fetchData(); const t = setInterval(()=>fetchData(), 30000); return ()=>clearInterval(t); } }, [authed, fetchData]);
 
-  const fetchBlockRecs = useCallback(async () => {
+  const fetchBlockRecs = useCallback(async (mode) => {
+    if (!token) return;
+    const src = mode || activeMode;
+    try {
+      const r = await fetch(`${API}/api/v1/block-recommendations?source=${src}`, { headers:{ Authorization:`Bearer ${token}` } });
+      if (r.ok) setBlockRecs(await r.json());
+    } catch {}
+  }, [token, activeMode]);
+
+  const fetchFirewallRules = useCallback(async () => {
     if (!token) return;
     try {
-      const r = await fetch(`${API}/api/v1/block-recommendations`, { headers:{ Authorization:`Bearer ${token}` } });
-      if (r.ok) setBlockRecs(await r.json());
+      const r = await fetch(`${API}/api/v1/firewall-rules`, { headers:{ Authorization:`Bearer ${token}` } });
+      if (r.ok) setFirewallRules(await r.json());
     } catch {}
   }, [token]);
 
   useEffect(() => { if (authed) { fetchBlockRecs(); const t = setInterval(()=>fetchBlockRecs(), 30000); return ()=>clearInterval(t); } }, [authed, fetchBlockRecs]);
+  useEffect(() => { if (authed) { fetchFirewallRules(); const t = setInterval(()=>fetchFirewallRules(), 30000); return ()=>clearInterval(t); } }, [authed, fetchFirewallRules]);
 
   async function login() {
     setLoading(true); setLoginError("");
@@ -334,16 +441,17 @@ export default function SOCDashboard() {
     setLoading(false);
   }
 
-  async function toggleInvestigations() {
-    const newState = !investigationsPaused;
+  async function toggleInvestigations(src) {
+    const source = src || activeMode;
+    const newState = !investigationsPaused[source];
     try {
-      await fetch(`${API}/api/v1/control`, {
+      await fetch(`${API}/api/v1/control?source=${source}`, {
         method: "POST",
         headers: { Authorization:`Bearer ${token}`, "Content-Type":"application/json" },
         body: JSON.stringify({ investigations_paused: newState }),
       });
-      setInvestigationsPaused(newState);
-    } catch { /* offline — toggle locally for visual feedback */ setInvestigationsPaused(newState); }
+      setInvestigationsPaused(prev => ({ ...prev, [source]: newState }));
+    } catch { setInvestigationsPaused(prev => ({ ...prev, [source]: newState })); }
   }
 
   async function searchHost() {
@@ -398,7 +506,7 @@ export default function SOCDashboard() {
       // Refresh incident list and detail
       const [detail, incidents] = await Promise.all([
         fetch(`${API}/api/v1/incidents/${incidentId}/detail`, { headers: h }).then(r => r.json()),
-        fetch(`${API}/api/v1/incidents`, { headers: h }).then(r => r.json()),
+        fetch(`${API}/api/v1/incidents?limit=500&source=${activeMode}`, { headers: h }).then(r => r.json()),
       ]);
       setIncidentDetail(detail);
       setSelectedIncident(prev => ({ ...prev, status: newStatus }));
@@ -430,6 +538,24 @@ export default function SOCDashboard() {
     setBlockAction(prev => { const n = {...prev}; delete n[incidentId]; return n; });
   };
 
+  const handleUnblockIP = async (ip) => {
+    // Strip CIDR suffix (e.g. /32) — pass as query param to avoid path-routing issues
+    const cleanIp = ip.replace(/\/\d+$/, '');
+    setUnblockAction(prev => ({ ...prev, [ip]: true }));
+    try {
+      const res = await fetch(`${API}/api/v1/firewall-rules?ip=${encodeURIComponent(cleanIp)}`, {
+        method: 'DELETE', headers: { Authorization:`Bearer ${token}` }
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        console.error('Unblock failed:', err.detail || res.status);
+      }
+      await fetchFirewallRules();
+      await fetchData(token, activeMode);
+    } catch(e) { console.error('Unblock error:', e); }
+    setUnblockAction(prev => { const n = {...prev}; delete n[ip]; return n; });
+  };
+
   const generateAIRemediation = async () => {
     if (!selectedIncident) return;
     setRemediationLoading(true);
@@ -458,76 +584,287 @@ export default function SOCDashboard() {
     {subject:"SOAR",value:92},{subject:"AI Agents",value:88},{subject:"API",value:95},
   ];
 
-  // ── Login screen ──────────────────────────────────────────────────────
+  // ── Login screen (standalone — landing page is in CyberSentinel_Landing.jsx) ──
   if (!authed) return (
-    <div style={{ minHeight:"100vh", background:"#050D15", display:"flex", alignItems:"center", justifyContent:"center", fontFamily:"'Share Tech Mono',monospace" }}>
-      <style>{`@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@700&display=swap'); @keyframes ping{0%{transform:scale(1);opacity:0.6}75%,100%{transform:scale(2.5);opacity:0}} * { box-sizing:border-box; }`}</style>
-      <div style={{ width:420, background:"rgba(13,27,42,0.95)", border:"1px solid rgba(79,195,247,0.2)", borderRadius:12, overflow:"hidden", boxShadow:"0 0 80px rgba(21,101,192,0.2)" }}>
-        <div style={{ background:"rgba(79,195,247,0.05)", padding:"24px 32px", borderBottom:"1px solid rgba(79,195,247,0.1)", textAlign:"center" }}>
-          <div style={{ fontSize:40, marginBottom:8 }}>🛡️</div>
-          <div style={{ fontFamily:"'Rajdhani',sans-serif", fontSize:24, fontWeight:700, color:"#E2E8F0", letterSpacing:3 }}>CYBERSENTINEL AI</div>
-          <div style={{ fontSize:10, color:"#546E7A", letterSpacing:3, marginTop:4 }}>SOC COMMAND CENTER</div>
-        </div>
-        <div style={{ padding:32 }}>
-          {["Username","Password"].map((label,i) => (
-            <div key={label} style={{ marginBottom:16 }}>
-              <div style={{ fontSize:9, color:"#546E7A", letterSpacing:2, marginBottom:6 }}>{label.toUpperCase()}</div>
-              <input type={i===1?"password":"text"} value={i===0?loginUser:loginPass}
-                onChange={e => i===0 ? setLoginUser(e.target.value) : setLoginPass(e.target.value)}
-                onKeyDown={e => e.key==="Enter" && login()}
-                style={{ width:"100%", background:"rgba(5,13,21,0.8)", border:"1px solid rgba(79,195,247,0.2)", borderRadius:6, padding:"10px 14px", color:"#E2E8F0", fontFamily:"'Share Tech Mono',monospace", fontSize:13, outline:"none" }}
-              />
-            </div>
+    <div style={{ background:"#020810", position:"relative", width:"100vw", height:"100vh",
+      overflow:"hidden", display:"flex", alignItems:"center", justifyContent:"center",
+      fontFamily:"'Share Tech Mono',monospace" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&family=DM+Sans:wght@400;500&display=swap');
+        *{box-sizing:border-box;margin:0;padding:0;}
+        @keyframes waterBorder {0%{border-color:rgba(0,176,255,0.35)}33%{border-color:rgba(79,195,247,0.6)}66%{border-color:rgba(0,229,255,0.4)}100%{border-color:rgba(0,176,255,0.35)}}
+        @keyframes cardScan    {0%{top:-4px;opacity:0}10%{opacity:0.6}85%{opacity:0.6}100%{top:100%;opacity:0}}
+        @keyframes hologram    {0%{background-position:200% center}100%{background-position:-200% center}}
+        @keyframes cornerPulse {0%,100%{opacity:0.55}50%{opacity:1}}
+        @keyframes shimmerFlow {0%{transform:translateX(-100%)}100%{transform:translateX(200%)}}
+        @keyframes hexGlow     {0%,100%{opacity:0.04}50%{opacity:0.09}}
+        @keyframes topBar      {0%{background-position:0% 0%}100%{background-position:200% 0%}}
+        @keyframes statusBlink {0%,100%{opacity:1}50%{opacity:0.3}}
+        .water-card  {animation:waterBorder 4s ease-in-out infinite;}
+        .holo-title  {background:linear-gradient(90deg,#4FC3F7,#00E5FF,#80DEEA,#00B0FF,#4FC3F7);background-size:200% auto;-webkit-background-clip:text;-webkit-text-fill-color:transparent;animation:hologram 3s linear infinite;}
+        .s-dot       {animation:statusBlink 2s ease-in-out infinite;}
+        .corner-br   {animation:cornerPulse 2.5s ease-in-out infinite;}
+        .hex-bg      {animation:hexGlow 3s ease-in-out infinite;}
+        .top-bar     {background:linear-gradient(90deg,transparent,#0D47A1,#00B0FF,#00E5FF,#0097A7,#00B0FF,transparent);background-size:200% 100%;animation:topBar 4s linear infinite;}
+        .login-input:focus{border-color:rgba(0,229,255,0.6)!important;box-shadow:0 0 0 3px rgba(0,176,255,0.12),0 0 16px rgba(0,176,255,0.2)!important;outline:none!important;}
+      `}</style>
+
+      {/* Background */}
+      <canvas ref={waterCanvasRef} style={{ position:"fixed",inset:0,zIndex:0,width:"100%",height:"100%",pointerEvents:"none" }}/>
+      <div className="hex-bg" style={{ position:"fixed",inset:0,zIndex:1,pointerEvents:"none",
+        backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='100'%3E%3Cpolygon points='28,2 54,16 54,44 28,58 2,44 2,16' fill='none' stroke='%2300B0FF' stroke-width='0.6'/%3E%3Cpolygon points='28,52 54,66 54,94 28,108 2,94 2,66' fill='none' stroke='%2300B0FF' stroke-width='0.6'/%3E%3C/svg%3E")`,
+        backgroundSize:"56px 100px" }}/>
+      <div style={{ position:"fixed",inset:0,zIndex:2,pointerEvents:"none",
+        background:"radial-gradient(ellipse at 50% 50%,rgba(2,8,18,0.1) 0%,rgba(2,8,18,0.6) 60%,rgba(2,8,18,0.88) 100%)" }}/>
+      <div className="top-bar" style={{ position:"fixed",top:0,left:0,right:0,height:2,zIndex:20,pointerEvents:"none" }}/>
+
+      {/* Centered login card */}
+      <div style={{ position:"relative",zIndex:5 }}>
+        <div className="water-card" style={{
+          width:"100%", maxWidth:400, position:"relative",
+          background:"rgba(2,10,22,0.88)", backdropFilter:"blur(24px) saturate(160%)",
+          WebkitBackdropFilter:"blur(24px) saturate(160%)",
+          border:"1px solid rgba(0,176,255,0.35)", borderRadius:14,
+          overflow:"hidden",
+          boxShadow:"0 8px 40px rgba(0,0,0,0.7), 0 0 60px rgba(0,100,200,0.15), inset 0 1px 0 rgba(0,229,255,0.08)",
+        }}>
+          {/* Scan beam */}
+          <div style={{ position:"absolute",left:0,right:0,height:2,zIndex:10,pointerEvents:"none",
+            background:"linear-gradient(90deg,transparent,rgba(0,229,255,0.6),transparent)",
+            animation:"cardScan 3.5s linear infinite" }}/>
+          {/* Shimmer */}
+          <div style={{ position:"absolute",inset:0,zIndex:1,pointerEvents:"none",overflow:"hidden",borderRadius:14 }}>
+            <div style={{ position:"absolute",top:0,bottom:0,width:"40%",
+              background:"linear-gradient(90deg,transparent,rgba(0,176,255,0.04),transparent)",
+              animation:"shimmerFlow 4s ease-in-out infinite" }}/>
+          </div>
+          {/* HUD corners */}
+          {[{top:0,left:0,bT:true,bL:true},{top:0,right:0,bT:true,bR:true},
+            {bottom:0,left:0,bB:true,bL:true},{bottom:0,right:0,bB:true,bR:true}
+          ].map((pos,i) => (
+            <div key={i} className="corner-br" style={{
+              position:"absolute", width:14, height:14, zIndex:12,
+              top:pos.top, right:pos.right, bottom:pos.bottom, left:pos.left,
+              borderTop:    pos.bT ? "2px solid rgba(0,229,255,0.8)" : "none",
+              borderBottom: pos.bB ? "2px solid rgba(0,229,255,0.8)" : "none",
+              borderLeft:   pos.bL ? "2px solid rgba(0,229,255,0.8)" : "none",
+              borderRight:  pos.bR ? "2px solid rgba(0,229,255,0.8)" : "none",
+            }}/>
           ))}
-          {loginError && <div style={{ fontSize:11, color:"#FF6D00", marginBottom:16 }}>{loginError}</div>}
-          <button onClick={login} disabled={loading} style={{
-            width:"100%", padding:"12px", background:"#1565C0", border:"none", borderRadius:6,
-            color:"#fff", fontFamily:"'Share Tech Mono',monospace", fontSize:13, letterSpacing:1,
-            cursor:"pointer", transition:"background 0.2s",
-          }}
-          onMouseEnter={e=>e.target.style.background="#1976D2"} onMouseLeave={e=>e.target.style.background="#1565C0"}
-          >{loading?"AUTHENTICATING...":"▶ ACCESS PLATFORM"}</button>
-          <div style={{ textAlign:"center", marginTop:16, fontSize:10, color:"#546E7A" }}>Default credentials: admin / cybersentinel2025</div>
+          {/* Header */}
+          <div style={{ position:"relative",zIndex:5,padding:"14px 22px",
+            borderBottom:"1px solid rgba(0,176,255,0.1)",
+            background:"linear-gradient(180deg,rgba(0,50,100,0.2),rgba(0,20,50,0.1))",
+            display:"flex",alignItems:"center",gap:10 }}>
+            <div className="s-dot" style={{ width:7,height:7,borderRadius:"50%",flexShrink:0,
+              background:"#00E5FF",boxShadow:"0 0 10px #00E5FF,0 0 20px rgba(0,229,255,0.4)" }}/>
+            <span className="holo-title" style={{ fontFamily:"'Orbitron',monospace",fontSize:9,
+              letterSpacing:3,fontWeight:700 }}>SECURE ACCESS TERMINAL</span>
+            <span style={{ marginLeft:"auto",fontFamily:"monospace",fontSize:7,
+              color:"rgba(0,176,255,0.4)",letterSpacing:1 }}>v1.1</span>
+          </div>
+          <div style={{ position:"relative",zIndex:5,padding:"22px 24px 20px" }}>
+            {/* Security stats */}
+            <div style={{ display:"flex",gap:12,marginBottom:18 }}>
+              {[["ENCRYPT","AES-256"],["PROTO","TLS 1.3"],["AUTH","JWT"]].map(([k,v]) => (
+                <div key={k} style={{ flex:1,background:"rgba(0,100,180,0.08)",
+                  border:"1px solid rgba(0,176,255,0.12)",borderRadius:5,padding:"5px 8px",textAlign:"center" }}>
+                  <div style={{ fontFamily:"'Share Tech Mono',monospace",fontSize:7,
+                    color:"rgba(0,176,255,0.5)",letterSpacing:1,marginBottom:2 }}>{k}</div>
+                  <div style={{ fontFamily:"'Share Tech Mono',monospace",fontSize:8,
+                    color:"rgba(0,229,255,0.7)" }}>{v}</div>
+                </div>
+              ))}
+            </div>
+            {/* Inputs */}
+            {[["USERNAME",loginUser,false],["PASSWORD",loginPass,true]].map(([lbl,val,isPass]) => (
+              <div key={lbl} style={{ marginBottom:14 }}>
+                <div style={{ display:"flex",justifyContent:"space-between",marginBottom:5 }}>
+                  <span style={{ fontSize:8,color:"rgba(0,176,255,0.5)",letterSpacing:2,
+                    fontFamily:"'Share Tech Mono',monospace" }}>{lbl}</span>
+                  <span style={{ fontSize:7,color:"rgba(0,176,255,0.25)",fontFamily:"monospace" }}>
+                    {isPass?"&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;":"REQUIRED"}
+                  </span>
+                </div>
+                <input
+                  type={isPass?"password":"text"} value={val}
+                  onChange={e => isPass ? setLoginPass(e.target.value) : setLoginUser(e.target.value)}
+                  onKeyDown={e => e.key==="Enter" && login()}
+                  className="login-input"
+                  style={{ width:"100%",background:"rgba(0,20,45,0.7)",
+                    border:"1px solid rgba(0,176,255,0.2)",borderRadius:7,
+                    padding:"11px 14px",color:"#B0D8F0",
+                    fontFamily:"'Share Tech Mono',monospace",fontSize:12,
+                    transition:"border-color 0.2s,box-shadow 0.2s",
+                    boxShadow:"inset 0 1px 4px rgba(0,0,0,0.4)" }}
+                />
+              </div>
+            ))}
+            {loginError && (
+              <div style={{ fontSize:10,color:"#FF6D00",marginBottom:14,fontFamily:"monospace",
+                background:"rgba(255,109,0,0.07)",border:"1px solid rgba(255,109,0,0.25)",
+                borderRadius:5,padding:"7px 12px",display:"flex",alignItems:"center",gap:6 }}>
+                <span style={{ fontSize:14 }}>!</span> {loginError}
+              </div>
+            )}
+            <button onClick={login} disabled={loading}
+              onMouseEnter={e=>{ e.currentTarget.style.background="linear-gradient(135deg,rgba(0,176,255,0.25),rgba(0,100,200,0.3))"; e.currentTarget.style.boxShadow="0 0 32px rgba(0,176,255,0.5)"; }}
+              onMouseLeave={e=>{ e.currentTarget.style.background="linear-gradient(135deg,rgba(0,80,160,0.3),rgba(0,40,100,0.2))"; e.currentTarget.style.boxShadow="0 0 16px rgba(0,176,255,0.2)"; }}
+              style={{ width:"100%",padding:"13px",cursor:loading?"wait":"pointer",
+                background:"linear-gradient(135deg,rgba(0,80,160,0.3),rgba(0,40,100,0.2))",
+                border:"1px solid rgba(0,176,255,0.45)",borderRadius:7,
+                color:"#00E5FF",fontFamily:"'Share Tech Mono',monospace",
+                fontSize:11,letterSpacing:3,
+                boxShadow:"0 0 16px rgba(0,176,255,0.2)",
+                transition:"all 0.2s",position:"relative",overflow:"hidden" }}>
+              {loading ? "AUTHENTICATING..." : "INITIALIZE ACCESS"}
+            </button>
+            <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",
+              marginTop:14,paddingTop:12,borderTop:"1px solid rgba(0,176,255,0.08)" }}>
+              <div>
+                <div style={{ fontSize:8,color:"rgba(0,176,255,0.35)",fontFamily:"monospace",marginBottom:2 }}>DEFAULT CREDENTIALS</div>
+                <div style={{ fontSize:9,color:"rgba(0,176,255,0.5)",fontFamily:"'Share Tech Mono',monospace" }}>admin / cybersentinel2025</div>
+              </div>
+              <div style={{ textAlign:"right" }}>
+                <div style={{ fontSize:7,color:"rgba(0,176,255,0.25)",fontFamily:"monospace",letterSpacing:1 }}>SESSION</div>
+                <div style={{ fontSize:8,color:"rgba(0,229,255,0.35)",fontFamily:"monospace" }}>ENCRYPTED</div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
+
     </div>
   );
 
+  // ── Mode accent colors ────────────────────────────────────────────────
+  const ACCENT      = activeMode === "simulator" ? "#1565C0" : "#00897B";
+  const ACCENT_LITE = activeMode === "simulator" ? "#4FC3F7" : "#4DB6AC";
+  const MODE_LABEL  = activeMode === "simulator" ? "SIMULATED THREAT LAB" : "LIVE NETWORK SOC";
+  const MODE_ICON   = activeMode === "simulator" ? "🔬" : "📡";
+  const invPaused   = investigationsPaused[activeMode];
+
   // ── Main dashboard ────────────────────────────────────────────────────
   return (
-    <div style={{ minHeight:"100vh", background:"#050D15", color:"#E2E8F0", display:"flex", flexDirection:"column" }}>
+    <div style={{ minHeight:"100vh", background:"#050D15", color:"#E2E8F0", display:"flex", flexDirection:"column", position:"relative" }}>
+      {/* Dot-grid background */}
+      <div style={{ position:"fixed",inset:0,zIndex:0,pointerEvents:"none",
+        backgroundImage:"radial-gradient(circle,rgba(79,195,247,0.07) 1px,transparent 1px)",
+        backgroundSize:"28px 28px" }}/>
+      {/* Animated top bar */}
+      <div style={{ position:"fixed",top:0,left:0,right:0,height:2,zIndex:200,pointerEvents:"none",
+        background:`linear-gradient(90deg,transparent,${ACCENT},${ACCENT_LITE},${ACCENT},transparent)` }}/>
+      <div style={{ position:"relative",zIndex:1,display:"flex",flexDirection:"column",minHeight:"100vh" }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@700&family=DM+Sans:wght@400;500&display=swap');
-        @keyframes ping{0%{transform:scale(1);opacity:0.6}75%,100%{transform:scale(2.5);opacity:0}}
-        @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+        @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@700&family=Orbitron:wght@700;900&family=DM+Sans:wght@400;500&display=swap');
+        @keyframes ping      {0%{transform:scale(1);opacity:0.6}75%,100%{transform:scale(2.5);opacity:0}}
+        @keyframes pulse     {0%,100%{opacity:1}50%{opacity:0.4}}
+        @keyframes ticker    {0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+        @keyframes neonCrit  {0%,100%{box-shadow:0 0 6px rgba(229,57,53,0.4),inset 0 0 6px rgba(229,57,53,0.05)}50%{box-shadow:0 0 18px rgba(229,57,53,0.7),inset 0 0 10px rgba(229,57,53,0.1)}}
+        @keyframes neonHigh  {0%,100%{box-shadow:0 0 5px rgba(255,109,0,0.3)}50%{box-shadow:0 0 14px rgba(255,109,0,0.6)}}
+        @keyframes glassIn   {from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes rowFade   {from{opacity:0;transform:translateX(-8px)}to{opacity:1;transform:translateX(0)}}
+        @keyframes scanH     {0%{transform:translateY(-100%)}100%{transform:translateY(100vh)}}
+        @keyframes borderFlow{0%,100%{border-color:rgba(79,195,247,0.2)}50%{border-color:rgba(79,195,247,0.45)}}
+        @keyframes topSlide  {from{transform:translateY(-6px);opacity:0}to{transform:translateY(0);opacity:1}}
+        @keyframes counterUp {from{opacity:0;transform:scale(0.85)}to{opacity:1;transform:scale(1)}}
         * { box-sizing:border-box; margin:0; padding:0; }
         ::-webkit-scrollbar{width:3px;background:#050D15}
-        ::-webkit-scrollbar-thumb{background:#1565C0;border-radius:2px}
+        ::-webkit-scrollbar-thumb{background:${ACCENT};border-radius:2px}
         input,button{font-family:'Share Tech Mono',monospace}
+        .glass-panel{
+          background:rgba(8,18,30,0.75)!important;
+          backdrop-filter:blur(12px)!important;
+          -webkit-backdrop-filter:blur(12px)!important;
+        }
+        .sev-CRITICAL{animation:neonCrit 2.5s ease-in-out infinite!important;}
+        .sev-HIGH{animation:neonHigh 3s ease-in-out infinite!important;}
+        .panel-in{animation:glassIn 0.45s ease-out forwards;}
+        .row-in{animation:rowFade 0.3s ease-out both;}
+        .metric-val{animation:counterUp 0.6s cubic-bezier(0.34,1.56,0.64,1) both;}
+        .tab-content{animation:glassIn 0.35s ease-out forwards;}
+        .dash-panel{
+          border-radius:12px!important;
+          border:1px solid rgba(79,195,247,0.1)!important;
+          transition:border-color 0.3s!important;
+        }
+        .dash-panel:hover{border-color:rgba(79,195,247,0.22)!important;}
+        .nav-btn{transition:all 0.18s!important;}
+        .nav-btn:hover{background:rgba(79,195,247,0.08)!important;color:#90CAF9!important;}
       `}</style>
+
+      {/* ── DUAL MODE SWITCHER BANNER ─────────────────────────────────── */}
+      <div style={{
+        height:40, background:"rgba(3,9,16,0.98)", borderBottom:"1px solid rgba(255,255,255,0.06)",
+        display:"flex", alignItems:"center", justifyContent:"center", gap:4,
+        position:"sticky", top:0, zIndex:101,
+      }}>
+        <div style={{ display:"flex", gap:2, background:"rgba(255,255,255,0.04)", borderRadius:8, padding:3 }}>
+          {[["simulator","🔬","SIMULATED THREAT LAB","#1565C0","#4FC3F7"],
+            ["dpi","📡","LIVE NETWORK SOC","#00897B","#4DB6AC"]].map(([mode, icon, label, accent, lite]) => {
+            const isActive = activeMode === mode;
+            return (
+              <button key={mode} onClick={() => {
+                setActiveMode(mode);
+                setData({ dash: MOCK.dashboard, alerts: [], incidents: [] });
+                setSelectedIncident(null);
+                setIncidentDetail(null);
+                setGeneratedRemediation(null);
+                setBlockRecs([]);
+                setFirewallRules([]);
+                fetchData(token, mode);
+                fetchBlockRecs(mode);
+                fetchFirewallRules();
+              }} style={{
+                padding:"5px 22px", border:"none", borderRadius:6, cursor:"pointer",
+                background: isActive ? `${accent}22` : "transparent",
+                color: isActive ? lite : "#38516A",
+                fontFamily:"'Share Tech Mono',monospace", fontSize:10, letterSpacing:1.5,
+                borderBottom: isActive ? `2px solid ${accent}` : "2px solid transparent",
+                transition:"all 0.18s", display:"flex", alignItems:"center", gap:7,
+              }}>
+                <span style={{ fontSize:13 }}>{icon}</span>
+                <span>{label}</span>
+                {isActive && <span style={{
+                  fontSize:8, color:accent, background:`${accent}22`,
+                  padding:"1px 7px", borderRadius:10, border:`1px solid ${accent}40`, letterSpacing:2,
+                }}>ACTIVE</span>}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ position:"absolute", right:20, fontFamily:"monospace", fontSize:9, color:"#38516A", letterSpacing:2 }}>
+          {activeMode === "simulator"
+            ? "Showing simulated attack traffic from Threat Simulator"
+            : "Showing real network traffic captured by DPI Sensor"}
+        </div>
+      </div>
 
       {/* TOP BAR */}
       <div style={{
-        height:52, background:"rgba(5,13,21,0.95)", borderBottom:"1px solid rgba(79,195,247,0.12)",
+        height:52, background:"rgba(5,13,21,0.95)", borderBottom:`1px solid ${ACCENT}22`,
         display:"flex", alignItems:"center", justifyContent:"space-between", padding:"0 20px",
-        position:"sticky", top:0, zIndex:100,
+        position:"sticky", top:40, zIndex:100,
       }}>
         <div style={{ display:"flex", alignItems:"center", gap:16 }}>
           <span style={{ fontSize:18 }}>🛡️</span>
           <span style={{ fontFamily:"'Rajdhani',sans-serif", fontSize:17, fontWeight:700, letterSpacing:2, color:"#E2E8F0" }}>CYBERSENTINEL</span>
-          <span style={{ fontFamily:"monospace", fontSize:9, color:"#4FC3F7", background:"rgba(79,195,247,0.1)", padding:"2px 8px", borderRadius:3, letterSpacing:2 }}>SOC v1.0</span>
+          <span style={{ fontFamily:"monospace", fontSize:9, color:ACCENT_LITE, background:`${ACCENT_LITE}18`, padding:"2px 8px", borderRadius:3, letterSpacing:2 }}>{MODE_ICON} {MODE_LABEL}</span>
           <div style={{ display:"flex", gap:1, marginLeft:8 }}>
-            {[["overview","◉ OVERVIEW"],["alerts","⚡ ALERTS"],["incidents","🚨 INCIDENTS"],["response","🛡️ RESPONSE"],["intel","🔍 THREAT INTEL"],["hosts","💻 HOSTS"]].map(([k,l]) => (
+            {[["overview","◉ OVERVIEW"],["alerts","⚡ ALERTS"],["incidents","🚨 INCIDENTS"],["response","🛡️ RESPONSE"],["intel","🔍 THREAT INTEL"],["hosts","💻 HOSTS"],["threatfeed","📡 THREAT FEED"]].map(([k,l]) => (
               <button key={k} onClick={()=>setTab(k)} style={{
-                padding:"6px 14px", border:"none", background: tab===k?"rgba(79,195,247,0.12)":"transparent",
-                color: tab===k?"#4FC3F7":"#546E7A", fontFamily:"'Share Tech Mono',monospace", fontSize:10,
+                padding:"6px 14px", border:"none", background: tab===k?`${ACCENT}22`:"transparent",
+                color: tab===k?ACCENT_LITE:"#546E7A", fontFamily:"'Share Tech Mono',monospace", fontSize:10,
                 letterSpacing:1, cursor:"pointer", borderRadius:4,
-                borderBottom: tab===k?"1px solid #4FC3F7":"1px solid transparent",
+                borderBottom: tab===k?`1px solid ${ACCENT_LITE}`:"1px solid transparent",
                 transition:"all 0.15s", position:"relative",
               }}>
                 {l}
                 {k==="response" && blockRecs.length > 0 && (
                   <span style={{ marginLeft:6, background:"#E53935", color:"#fff", fontSize:9, fontWeight:700, padding:"1px 5px", borderRadius:8, verticalAlign:"middle" }}>{blockRecs.length}</span>
+                )}
+                {k==="threatfeed" && (data.alerts||[]).length > 0 && (
+                  <span style={{ marginLeft:6, background:ACCENT, color:"#fff", fontSize:9, fontWeight:700, padding:"1px 5px", borderRadius:8, verticalAlign:"middle" }}>{(data.alerts||[]).length}</span>
                 )}
               </button>
             ))}
@@ -538,15 +875,16 @@ export default function SOCDashboard() {
             <ThreatDot color={apiLive?"#00E676":"#FF6D00"} size={5}/>
             <span style={{ color:apiLive?"#00E676":"#FF6D00" }}>{apiLive?"LIVE API":"CONNECTING..."}</span>
           </div>
+          {/* Per-source AI investigation toggle */}
           {apiLive && (
-            <button onClick={toggleInvestigations} style={{
-              padding:"3px 10px", border:`1px solid ${investigationsPaused?"#546E7A":"#00E676"}`,
-              borderRadius:4, background:investigationsPaused?"rgba(84,110,122,0.15)":"rgba(0,230,118,0.1)",
-              color:investigationsPaused?"#546E7A":"#00E676",
+            <button onClick={()=>toggleInvestigations(activeMode)} style={{
+              padding:"3px 10px", border:`1px solid ${invPaused?"#546E7A":"#00E676"}`,
+              borderRadius:4, background:invPaused?"rgba(84,110,122,0.15)":"rgba(0,230,118,0.1)",
+              color:invPaused?"#546E7A":"#00E676",
               fontFamily:"'Share Tech Mono',monospace", fontSize:9, letterSpacing:1,
               cursor:"pointer", transition:"all 0.2s",
             }}>
-              {investigationsPaused?"▶ AI INVEST OFF":"⏸ AI INVEST ON"}
+              {invPaused?"▶ AI INVEST OFF":"⏸ AI INVEST ON"}
             </button>
           )}
           <span style={{ color:"#546E7A" }}>|</span>
@@ -561,19 +899,19 @@ export default function SOCDashboard() {
       </div>
 
       {/* INVESTIGATIONS PAUSED BANNER */}
-      {apiLive && investigationsPaused && (
+      {apiLive && invPaused && (
         <div style={{
           background:"rgba(84,110,122,0.12)", borderBottom:"1px solid rgba(84,110,122,0.3)",
           padding:"6px 20px", display:"flex", alignItems:"center", gap:10,
           fontFamily:"'Share Tech Mono',monospace", fontSize:10, color:"#78909C", letterSpacing:1,
         }}>
           <span>⏸</span>
-          <span>AI INVESTIGATIONS PAUSED — Alerts are being logged but no OpenAI API calls are being made. Click <strong style={{color:"#B0BEC5"}}>AI INVEST OFF</strong> in the top bar to resume.</span>
+          <span>AI INVESTIGATIONS PAUSED [{MODE_LABEL}] — Alerts are logged but no AI calls are being made. Click <strong style={{color:"#B0BEC5"}}>AI INVEST OFF</strong> in the top bar to resume.</span>
         </div>
       )}
 
       {/* CONTENT */}
-      <div style={{ flex:1, padding:16, overflow:"auto" }}>
+      <div key={tab} className="tab-content" style={{ flex:1, padding:16, overflow:"auto" }}>
 
         {/* ── OVERVIEW TAB ── */}
         {tab==="overview" && (
@@ -686,43 +1024,143 @@ export default function SOCDashboard() {
         )}
 
         {/* ── ALERTS TAB ── */}
-        {tab==="alerts" && (
-          <Panel title="All Alerts" badge={`${(data.alerts||[]).length} results`} style={{ height:"calc(100vh - 100px)" }}>
-            <div style={{ overflow:"auto" }}>
-              <table style={{ width:"100%", borderCollapse:"collapse", fontFamily:"monospace", fontSize:12 }}>
-                <thead>
-                  <tr style={{ borderBottom:"1px solid rgba(79,195,247,0.15)" }}>
-                    {["Severity","Type","Source IP","Destination","MITRE","Score","Time"].map(h => (
-                      <th key={h} style={{ padding:"10px 14px", textAlign:"left", fontFamily:"'Share Tech Mono',monospace", fontSize:9, color:"#546E7A", letterSpacing:2, fontWeight:400 }}>{h.toUpperCase()}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {(data.alerts||[]).map((a,i) => (
-                    <tr key={a.id||i} style={{ borderBottom:"1px solid rgba(255,255,255,0.03)", transition:"background 0.15s" }}
-                      onMouseEnter={e=>e.currentTarget.style.background="rgba(79,195,247,0.04)"}
-                      onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                      <td style={{ padding:"10px 14px" }}><SevBadge s={a.severity}/></td>
-                      <td style={{ padding:"10px 14px", color:"#CBD5E1", fontSize:11 }}>{a.type?.replace("_DETECTED","").replace(/_/g," ")}</td>
-                      <td style={{ padding:"10px 14px", color:"#4FC3F7" }}>{a.src_ip}</td>
-                      <td style={{ padding:"10px 14px", color:"#8899AA" }}>{a.dst_ip||"—"}</td>
-                      <td style={{ padding:"10px 14px" }}><span style={{ color:"#FFD740", fontSize:11 }}>{a.mitre_technique||"—"}</span></td>
-                      <td style={{ padding:"10px 14px" }}>
-                        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                          <div style={{ flex:1, height:3, background:"rgba(255,255,255,0.08)", borderRadius:2 }}>
-                            <div style={{ width:`${(a.anomaly_score||0)*100}%`, height:"100%", background:SEV_COLOR[a.severity]||"#4FC3F7", borderRadius:2 }}/>
-                          </div>
-                          <span style={{ color:"#8899AA", fontSize:10 }}>{((a.anomaly_score||0)*100).toFixed(0)}%</span>
-                        </div>
-                      </td>
-                      <td style={{ padding:"10px 14px", color:"#546E7A", fontSize:10 }}>{ago(a.timestamp)}</td>
+        {tab==="alerts" && (() => {
+          const allAlerts = apiLive ? (data.alerts||[]) : MOCK.alerts;
+          const SEV_ORDER = ["CRITICAL","HIGH","MEDIUM","LOW","INFO"];
+          const grouped = SEV_ORDER.reduce((acc,s) => {
+            const items = allAlerts.filter(a => (a.severity||"INFO") === s);
+            if (items.length) acc[s] = items;
+            return acc;
+          }, {});
+          const unknownMitre = allAlerts.filter(a => !a.mitre_technique || a.mitre_technique==="UNKNOWN");
+
+          function AlertRow({ a, i }) {
+            const mitre = a.mitre_technique || a.matched_mitre || "";
+            const isUnknown = !mitre || mitre === "UNKNOWN";
+            const isCrit = a.severity === "CRITICAL";
+            const isHigh = a.severity === "HIGH";
+            return (
+              <tr key={a.id||i} className={`row-in${isCrit?" sev-CRITICAL":isHigh?" sev-HIGH":""}`}
+                style={{
+                  borderBottom:"1px solid rgba(255,255,255,0.03)",
+                  transition:"background 0.15s",
+                  animationDelay:`${Math.min(i * 0.03, 0.6)}s`,
+                  borderLeft: isCrit ? "2px solid rgba(229,57,53,0.6)" : isHigh ? "2px solid rgba(255,109,0,0.5)" : "2px solid transparent",
+                }}
+                onMouseEnter={e=>e.currentTarget.style.background=isCrit?"rgba(229,57,53,0.06)":isHigh?"rgba(255,109,0,0.05)":"rgba(79,195,247,0.04)"}
+                onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                <td style={{ padding:"9px 14px" }}><SevBadge s={a.severity}/></td>
+                <td style={{ padding:"9px 14px", color:"#CBD5E1", fontSize:11, maxWidth:200 }}>
+                  <div style={{ whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+                    {a.type?.replace("_DETECTED","").replace(/_/g," ")}
+                  </div>
+                  {isUnknown && (
+                    <div style={{ fontSize:9, color:"#FF6D00", marginTop:2, letterSpacing:0.5 }}>UNKNOWN — AI CLASSIFYING</div>
+                  )}
+                </td>
+                <td style={{ padding:"9px 14px", color:"#4FC3F7", fontFamily:"monospace", fontSize:11 }}>{a.src_ip}</td>
+                <td style={{ padding:"9px 14px", color:"#8899AA", fontFamily:"monospace", fontSize:11 }}>{a.dst_ip||"—"}</td>
+                <td style={{ padding:"9px 14px" }}>
+                  {isUnknown
+                    ? <span style={{ fontSize:9, color:"#FF6D00", background:"rgba(255,109,0,0.1)", padding:"2px 6px", borderRadius:3, border:"1px solid rgba(255,109,0,0.25)" }}>UNKNOWN</span>
+                    : <span style={{ color:"#FFD740", fontSize:11, fontFamily:"monospace" }}>{mitre}</span>
+                  }
+                </td>
+                <td style={{ padding:"9px 14px" }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:6, minWidth:80 }}>
+                    <div style={{ flex:1, height:3, background:"rgba(255,255,255,0.08)", borderRadius:2 }}>
+                      <div style={{ width:`${(a.anomaly_score||0)*100}%`, height:"100%", background:SEV_COLOR[a.severity]||"#4FC3F7", borderRadius:2 }}/>
+                    </div>
+                    <span style={{ color:"#8899AA", fontSize:10, whiteSpace:"nowrap" }}>{((a.anomaly_score||0)*100).toFixed(0)}%</span>
+                  </div>
+                </td>
+                <td style={{ padding:"9px 14px", color:"#546E7A", fontSize:10, whiteSpace:"nowrap" }}>{ago(a.timestamp)}</td>
+              </tr>
+            );
+          }
+
+          function SevSection({ sev, alerts }) {
+            const icon = { CRITICAL:"🚨", HIGH:"⚠️", MEDIUM:"🔔", LOW:"ℹ️", INFO:"💬" }[sev] || "●";
+            const isCrit = sev === "CRITICAL", isHigh = sev === "HIGH";
+            return (
+              <div style={{ marginBottom:4 }}>
+                <div className={isCrit?"sev-CRITICAL":isHigh?"sev-HIGH":""} style={{
+                  display:"flex", alignItems:"center", gap:10,
+                  padding:"8px 14px", background:`${SEV_BG[sev]||"rgba(255,255,255,0.03)"}`,
+                  borderBottom:`1px solid ${SEV_COLOR[sev]||"#fff"}20`,
+                  borderLeft:`3px solid ${SEV_COLOR[sev]||"#fff"}`,
+                  position:"sticky", top:0, zIndex:1,
+                  backdropFilter:"blur(8px)",
+                }}>
+                  <span style={{ fontSize:13 }}>{icon}</span>
+                  <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:10, color:SEV_COLOR[sev]||"#fff", letterSpacing:2 }}>{sev}</span>
+                  <span style={{ fontFamily:"monospace", fontSize:10, color:`${SEV_COLOR[sev]}80`, background:`${SEV_COLOR[sev]}15`, padding:"1px 8px", borderRadius:10, border:`1px solid ${SEV_COLOR[sev]}30` }}>{alerts.length}</span>
+                  <span style={{ fontSize:10, color:"#38516A", marginLeft:"auto" }}>
+                    {sev==="CRITICAL"?"Immediate action required":sev==="HIGH"?"Investigate within 1h":sev==="MEDIUM"?"Review within 4h":"Monitor"}
+                  </span>
+                </div>
+                <table style={{ width:"100%", borderCollapse:"collapse", fontFamily:"monospace", fontSize:12 }}>
+                  <tbody>
+                    {alerts.map((a,i) => <AlertRow key={a.id||i} a={a} i={i}/>)}
+                  </tbody>
+                </table>
+              </div>
+            );
+          }
+
+          return (
+            <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+              {/* Summary row */}
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:10 }}>
+                {SEV_ORDER.map(s => (
+                  <div key={s} style={{ background:`${SEV_BG[s]||"rgba(255,255,255,0.03)"}`, border:`1px solid ${SEV_COLOR[s]||"#fff"}25`, borderRadius:8, padding:"12px 16px" }}>
+                    <div style={{ fontSize:9, color:"#546E7A", letterSpacing:2, marginBottom:6 }}>{s}</div>
+                    <div style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:24, color:SEV_COLOR[s]||"#fff", fontWeight:700 }}>
+                      {allAlerts.filter(a=>(a.severity||"INFO")===s).length}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Unknown threats callout */}
+              {unknownMitre.length > 0 && (
+                <div style={{ background:"rgba(255,109,0,0.05)", border:"1px solid rgba(255,109,0,0.25)", borderRadius:8, padding:"10px 16px", display:"flex", alignItems:"center", gap:10 }}>
+                  <ThreatDot color="#FF6D00" size={5}/>
+                  <span style={{ fontFamily:"monospace", fontSize:11, color:"#FF6D00" }}>
+                    {unknownMitre.length} alert{unknownMitre.length!==1?"s":""} with UNKNOWN threat type — AI classification pending. See 📡 THREAT FEED for details.
+                  </span>
+                </div>
+              )}
+
+              {/* Grouped table by severity */}
+              <div className="dash-panel panel-in" style={{ background:"rgba(7,16,27,0.8)", backdropFilter:"blur(12px)", border:"1px solid rgba(79,195,247,0.1)", borderRadius:12, overflow:"hidden" }}>
+                <div style={{ padding:"10px 14px", borderBottom:"1px solid rgba(79,195,247,0.08)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                  <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:10, color:"#4FC3F7", letterSpacing:2 }}>ALL ALERTS — GROUPED BY SEVERITY</span>
+                  <span style={{ fontFamily:"monospace", fontSize:10, color:"#546E7A" }}>{allAlerts.length} total</span>
+                </div>
+                {/* Column headers */}
+                <table style={{ width:"100%", borderCollapse:"collapse", fontFamily:"monospace", fontSize:12 }}>
+                  <thead>
+                    <tr style={{ borderBottom:"1px solid rgba(79,195,247,0.1)", background:"rgba(79,195,247,0.03)" }}>
+                      {["Severity","Type","Source IP","Destination","MITRE","Score","Time"].map(h => (
+                        <th key={h} style={{ padding:"8px 14px", textAlign:"left", fontFamily:"'Share Tech Mono',monospace", fontSize:9, color:"#546E7A", letterSpacing:2, fontWeight:400 }}>{h.toUpperCase()}</th>
+                      ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                </table>
+                <div style={{ maxHeight:"calc(100vh - 280px)", overflowY:"auto" }}>
+                  {Object.keys(grouped).length === 0 ? (
+                    <div style={{ textAlign:"center", padding:"50px 0", color:"#546E7A", fontFamily:"monospace", fontSize:12 }}>No alerts yet — waiting for threat traffic...</div>
+                  ) : (
+                    Object.entries(grouped).map(([sev, alerts]) => (
+                      <SevSection key={sev} sev={sev} alerts={alerts}/>
+                    ))
+                  )}
+                </div>
+              </div>
             </div>
-          </Panel>
-        )}
+          );
+        })()}
 
         {/* ── RESPONSE TAB ── */}
         {tab==="response" && (
@@ -730,9 +1168,65 @@ export default function SOCDashboard() {
             <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12 }}>
               <MetricCard label="Pending Block Actions" value={blockRecs.length} color="#E53935" live={blockRecs.length>0} icon="🚫"/>
               <MetricCard label="Blocked IPs (24h)" value={data.dash.blocked_ips??0} color="#FF6D00" icon="🔒"/>
-              <MetricCard label="Active Incidents" value={data.dash.active_incidents??0} color="#FFD740" icon="📋"/>
+              <MetricCard label="Active Incidents" value={(data.incidents||[]).filter(i=>i.status==='OPEN').length} color="#FFD740" icon="📋"/>
             </div>
-            <div style={{ background:"rgba(13,27,42,0.85)", border:`1px solid ${blockRecs.length > 0 ? "rgba(229,57,53,0.35)" : "rgba(79,195,247,0.1)"}`, borderRadius:10, overflow:"hidden" }}>
+
+            {/* ── ACTIVE INCIDENTS PANEL ── */}
+            {(() => {
+              const openInc = (data.incidents||[]).filter(i => i.status === 'OPEN');
+              return (
+                <div className="dash-panel panel-in" style={{ background:"rgba(7,16,27,0.8)", backdropFilter:"blur(12px)", border:"1px solid rgba(255,215,64,0.15)", borderRadius:12, overflow:"hidden" }}>
+                  <div style={{ padding:"12px 18px", borderBottom:"1px solid rgba(255,215,64,0.1)", background:"rgba(255,215,64,0.03)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                      {openInc.length > 0 && <ThreatDot color="#FFD740" size={5}/>}
+                      <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:10, color:"#FFD740", letterSpacing:2 }}>ACTIVE INCIDENTS</span>
+                      <span style={{ fontFamily:"monospace", fontSize:10, color:"#FFD740", background:"rgba(255,215,64,0.1)", padding:"2px 10px", borderRadius:10, border:"1px solid rgba(255,215,64,0.25)" }}>{openInc.length} OPEN</span>
+                    </div>
+                    <button onClick={()=>setTab("incidents")} style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:9, color:"#4FC3F7", background:"rgba(79,195,247,0.06)", border:"1px solid rgba(79,195,247,0.2)", borderRadius:4, padding:"3px 10px", cursor:"pointer", letterSpacing:1 }}>
+                      VIEW ALL →
+                    </button>
+                  </div>
+                  <div style={{ padding:16, display:"flex", flexDirection:"column", gap:8, maxHeight:320, overflowY:"auto" }}>
+                    {openInc.length === 0 ? (
+                      <div style={{ textAlign:"center", color:"#546E7A", fontFamily:"monospace", fontSize:11, padding:"24px 0" }}>
+                        ✅ No open incidents
+                      </div>
+                    ) : openInc.slice(0,10).map(inc => {
+                      const sev = inc.severity || 'MEDIUM';
+                      const sevColor = sev==='CRITICAL'?'#FF5252':sev==='HIGH'?'#FF6D00':sev==='MEDIUM'?'#FFD740':'#78909C';
+                      const isPending = !inc.investigation_summary || inc.investigation_summary?.startsWith('⏸');
+                      return (
+                        <div key={inc.incident_id}
+                          onClick={()=>{ setSelectedIncident(inc); setTab("incidents"); }}
+                          style={{ background:`${sevColor}08`, border:`1px solid ${sevColor}25`,
+                            borderLeft:`3px solid ${sevColor}`, borderRadius:8,
+                            padding:"12px 16px", cursor:"pointer", transition:"all 0.15s" }}
+                          onMouseEnter={e=>{ e.currentTarget.style.background=`${sevColor}14`; e.currentTarget.style.borderColor=`${sevColor}50`; }}
+                          onMouseLeave={e=>{ e.currentTarget.style.background=`${sevColor}08`; e.currentTarget.style.borderColor=`${sevColor}25`; }}>
+                          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6, flexWrap:"wrap" }}>
+                            <SevBadge s={sev}/>
+                            <span style={{ fontFamily:"monospace", fontSize:9, color:"#546E7A" }}>{inc.incident_id}</span>
+                            {isPending && (
+                              <span style={{ fontFamily:"monospace", fontSize:9, color:"#FFD740", background:"rgba(255,215,64,0.1)", border:"1px solid rgba(255,215,64,0.25)", padding:"1px 7px", borderRadius:3 }}>⏸ PENDING AI</span>
+                            )}
+                            {inc.block_recommended && (
+                              <span style={{ fontFamily:"monospace", fontSize:9, color:"#E53935", background:"rgba(229,57,53,0.1)", border:"1px solid rgba(229,57,53,0.3)", padding:"1px 7px", borderRadius:3 }}>🚫 BLOCK REC</span>
+                            )}
+                            <span style={{ marginLeft:"auto", fontFamily:"monospace", fontSize:9, color:"#3D5465" }}>{ago(inc.created_at)}</span>
+                          </div>
+                          <div style={{ fontSize:12, color:"#CBD5E1", marginBottom:4, fontWeight:500 }}>{inc.title}</div>
+                          <div style={{ fontSize:10, color:"#546E7A", fontFamily:"monospace" }}>
+                            {(inc.affected_ips||[]).join(", ")||"—"}
+                            {(inc.mitre_techniques||[]).length > 0 && ` · ${inc.mitre_techniques[0]}`}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
+            <div className="dash-panel panel-in" style={{ background:"rgba(7,16,27,0.8)", backdropFilter:"blur(12px)", border:`1px solid ${blockRecs.length > 0 ? "rgba(229,57,53,0.35)" : "rgba(79,195,247,0.1)"}`, borderRadius:12, overflow:"hidden" }}>
               <div style={{ padding:"12px 18px", borderBottom:`1px solid ${blockRecs.length > 0 ? "rgba(229,57,53,0.2)" : "rgba(79,195,247,0.08)"}`, background: blockRecs.length > 0 ? "rgba(229,57,53,0.05)" : "rgba(79,195,247,0.03)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
                 <div style={{ display:"flex", alignItems:"center", gap:10 }}>
                   {blockRecs.length > 0 && <ThreatDot color="#E53935" size={5}/>}
@@ -785,65 +1279,218 @@ export default function SOCDashboard() {
                 ))}
               </div>
             </div>
+
+            {/* ── FIREWALL RULES PANEL ── */}
+            {(() => {
+              const filtered = firewallRules.filter(r =>
+                firewallFilter === "all" ? true :
+                firewallFilter === "active" ? r.is_active :
+                !r.is_active
+              );
+              const activeCount  = firewallRules.filter(r => r.is_active).length;
+              const expiredCount = firewallRules.filter(r => !r.is_active).length;
+              return (
+                <div className="dash-panel panel-in" style={{ background:"rgba(7,16,27,0.8)", backdropFilter:"blur(12px)", border:"1px solid rgba(79,195,247,0.1)", borderRadius:12, overflow:"hidden" }}>
+                  {/* Header */}
+                  <div style={{ padding:"12px 18px", borderBottom:"1px solid rgba(79,195,247,0.07)", background:"rgba(79,195,247,0.025)", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:8 }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                      {activeCount > 0 && <ThreatDot color="#FF6D00" size={5}/>}
+                      <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:10, color:"#4FC3F7", letterSpacing:2 }}>FIREWALL RULES — BLOCK LOG</span>
+                      <span style={{ fontFamily:"monospace", fontSize:10, color:"#FF6D00", background:"rgba(255,109,0,0.12)", padding:"2px 10px", borderRadius:10, border:"1px solid rgba(255,109,0,0.25)" }}>{activeCount} ACTIVE</span>
+                      <span style={{ fontFamily:"monospace", fontSize:10, color:"#546E7A", background:"rgba(84,110,122,0.08)", padding:"2px 10px", borderRadius:10 }}>{expiredCount} EXPIRED</span>
+                    </div>
+                    <div style={{ display:"flex", gap:4 }}>
+                      {["all","active","expired"].map(f => (
+                        <button key={f} onClick={()=>setFirewallFilter(f)} style={{
+                          padding:"3px 12px", border:`1px solid ${firewallFilter===f?"#4FC3F7":"rgba(79,195,247,0.15)"}`,
+                          borderRadius:4, background: firewallFilter===f?"rgba(79,195,247,0.1)":"transparent",
+                          color: firewallFilter===f?"#4FC3F7":"#546E7A",
+                          fontFamily:"'Share Tech Mono',monospace", fontSize:9, letterSpacing:1, cursor:"pointer",
+                        }}>{f.toUpperCase()}</button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Table */}
+                  <div style={{ padding:16 }}>
+                    {filtered.length === 0 ? (
+                      <div style={{ textAlign:"center", color:"#546E7A", fontFamily:"monospace", fontSize:11, padding:"30px 0" }}>
+                        {firewallRules.length === 0 ? "No firewall rules yet — blocked IPs will appear here after analyst approval" : `No ${firewallFilter} rules`}
+                      </div>
+                    ) : (
+                      <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                        {/* Column headers */}
+                        <div style={{ display:"grid", gridTemplateColumns:"140px 1fr 90px 130px 130px 110px", gap:8, padding:"4px 10px", borderBottom:"1px solid rgba(79,195,247,0.08)" }}>
+                          {["IP ADDRESS","JUSTIFICATION","DURATION","BLOCKED AT","EXPIRES AT","STATUS"].map(h => (
+                            <span key={h} style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:9, color:"#546E7A", letterSpacing:1 }}>{h}</span>
+                          ))}
+                        </div>
+                        {filtered.map(rule => (
+                          <div key={rule.id} style={{
+                            display:"grid", gridTemplateColumns:"140px 1fr 90px 130px 130px 110px",
+                            gap:8, padding:"10px 10px", borderRadius:6, alignItems:"center",
+                            background: rule.is_active ? "rgba(255,109,0,0.04)" : "rgba(84,110,122,0.04)",
+                            border: `1px solid ${rule.is_active ? "rgba(255,109,0,0.2)" : "rgba(84,110,122,0.15)"}`,
+                            borderLeft: `3px solid ${rule.is_active ? "#FF6D00" : "#546E7A"}`,
+                          }}>
+                            <span style={{ fontFamily:"monospace", fontSize:12, color: rule.is_active ? "#FF6D00" : "#78909C", fontWeight:700 }}>
+                              {rule.ip_address}
+                            </span>
+                            <span style={{ fontFamily:"monospace", fontSize:10, color:"#8899AA", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={rule.justification}>
+                              {rule.justification || "—"}
+                            </span>
+                            <span style={{ fontFamily:"monospace", fontSize:10, color:"#546E7A" }}>
+                              {rule.duration_hours > 0 ? `${rule.duration_hours}h` : "Expired"}
+                            </span>
+                            <span style={{ fontFamily:"monospace", fontSize:10, color:"#546E7A" }}>
+                              {new Date(rule.created_at).toLocaleString()}
+                            </span>
+                            <span style={{ fontFamily:"monospace", fontSize:10, color: rule.is_active ? "#FFD740" : "#546E7A" }}>
+                              {rule.expires_at ? new Date(rule.expires_at).toLocaleString() : "Never"}
+                            </span>
+                            <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                              <span style={{
+                                fontFamily:"'Share Tech Mono',monospace", fontSize:9, letterSpacing:1,
+                                color: rule.is_active ? "#FF6D00" : "#546E7A",
+                                background: rule.is_active ? "rgba(255,109,0,0.12)" : "rgba(84,110,122,0.12)",
+                                padding:"2px 8px", borderRadius:3,
+                                border: `1px solid ${rule.is_active ? "rgba(255,109,0,0.3)" : "rgba(84,110,122,0.2)"}`,
+                              }}>
+                                {rule.is_active ? "ACTIVE" : "EXPIRED"}
+                              </span>
+                              {rule.is_active && (
+                                <button onClick={()=>handleUnblockIP(rule.ip_address)} disabled={!!unblockAction[rule.ip_address]}
+                                  style={{ padding:"2px 8px", background:"rgba(102,187,106,0.1)", border:"1px solid rgba(102,187,106,0.3)", borderRadius:3, color:"#66BB6A", cursor: unblockAction[rule.ip_address]?"wait":"pointer", fontSize:9, fontFamily:"'Share Tech Mono',monospace", letterSpacing:0.5 }}>
+                                  {unblockAction[rule.ip_address] ? "..." : "UNBLOCK"}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ padding:"8px 18px", borderTop:"1px solid rgba(79,195,247,0.06)", display:"flex", alignItems:"center", gap:8 }}>
+                    <span style={{ fontFamily:"monospace", fontSize:9, color:"#37474F" }}>
+                      ⚠ Block rules are logged in the database only — no live firewall enforcement is active.
+                      See <span style={{ color:"#4FC3F7" }}>docs/REAL_IP_BLOCKING.md</span> for production enforcement options.
+                    </span>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         )}
 
         {/* ── INCIDENTS TAB ── */}
-        {tab==="incidents" && (
-          <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-            <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12 }}>
-              {Object.entries(STATUS_COLOR).map(([s,c]) => (
-                <MetricCard key={s} label={s} icon="" color={c}
-                  value={(data.incidents||[]).filter(i=>i.status===s).length}
-                  sub={`incidents ${s.toLowerCase()}`}/>
-              ))}
-            </div>
-            <Panel title="Incident Registry" badge={`${(data.incidents||[]).length} total`} style={{ flex:1 }}>
-              <div style={{ padding:16, display:"flex", flexDirection:"column", gap:12 }}>
-                {(data.incidents||[]).length===0 ? (
-                  <div style={{ textAlign:"center", padding:40, color:"#546E7A", fontFamily:"monospace", fontSize:12 }}>
-                    {investigationsPaused ? "AI investigations paused — no incidents being created" : "No incidents yet — waiting for AI investigations to complete"}
-                  </div>
-                ) : (data.incidents||[]).map(inc => (
-                  <div key={inc.incident_id}
-                    onClick={() => openIncidentDrawer(inc)}
-                    style={{
-                      background:"rgba(5,13,21,0.6)", border:`1px solid ${STATUS_COLOR[inc.status]||"#546E7A"}30`,
-                      borderLeft:`3px solid ${STATUS_COLOR[inc.status]||"#546E7A"}`,
-                      borderRadius:8, padding:"16px 20px",
-                      transition:"all 0.2s",
-                      cursor: "pointer",
-                    }}
-                    onMouseEnter={e=>e.currentTarget.style.background="rgba(79,195,247,0.08)"}
-                    onMouseLeave={e=>e.currentTarget.style.background="rgba(5,13,21,0.6)"}>
-                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:10 }}>
-                      <div>
-                        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:6 }}>
-                          <span style={{ fontFamily:"monospace", fontSize:10, color:"#546E7A" }}>{inc.incident_id}</span>
-                          <SevBadge s={inc.severity}/>
-                          <span style={{ fontFamily:"monospace", fontSize:10, color:STATUS_COLOR[inc.status], background:`${STATUS_COLOR[inc.status]}18`, padding:"2px 8px", borderRadius:3, border:`1px solid ${STATUS_COLOR[inc.status]}40`, letterSpacing:1 }}>{inc.status}</span>
-                        </div>
-                        <div style={{ fontSize:13, color:"#E2E8F0", fontWeight:500 }}>{inc.title}</div>
-                      </div>
-                      <div style={{ textAlign:"right", fontFamily:"monospace", fontSize:10, color:"#546E7A" }}>{ago(inc.created_at)}</div>
+        {tab==="incidents" && (() => {
+          const allInc = apiLive ? (data.incidents||[]) : MOCK.incidents;
+          const unknownInc = allInc.filter(i => !i.mitre_techniques?.length || i.mitre_techniques.includes("UNKNOWN"));
+          const knownInc   = allInc.filter(i => i.mitre_techniques?.length && !i.mitre_techniques.includes("UNKNOWN"));
+
+          function IncCard({ inc }) {
+            const isUnknown = !inc.mitre_techniques?.length || inc.mitre_techniques.includes("UNKNOWN");
+            const border = isUnknown ? "rgba(255,109,0,0.4)" : `${STATUS_COLOR[inc.status]||"#546E7A"}30`;
+            const accent = isUnknown ? "#FF6D00" : (STATUS_COLOR[inc.status]||"#546E7A");
+            return (
+              <div
+                onClick={() => openIncidentDrawer(inc)}
+                style={{
+                  background: isUnknown ? "rgba(255,109,0,0.04)" : "rgba(5,13,21,0.6)",
+                  border:`1px solid ${border}`,
+                  borderLeft:`3px solid ${accent}`,
+                  borderRadius:8, padding:"16px 20px",
+                  transition:"all 0.2s", cursor:"pointer",
+                }}
+                onMouseEnter={e=>e.currentTarget.style.background=isUnknown?"rgba(255,109,0,0.08)":"rgba(79,195,247,0.08)"}
+                onMouseLeave={e=>e.currentTarget.style.background=isUnknown?"rgba(255,109,0,0.04)":"rgba(5,13,21,0.6)"}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:10 }}>
+                  <div>
+                    <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6, flexWrap:"wrap" }}>
+                      <span style={{ fontFamily:"monospace", fontSize:10, color:"#546E7A" }}>{inc.incident_id}</span>
+                      <SevBadge s={inc.severity}/>
+                      <span style={{ fontFamily:"monospace", fontSize:10, color:STATUS_COLOR[inc.status], background:`${STATUS_COLOR[inc.status]}18`, padding:"2px 8px", borderRadius:3, border:`1px solid ${STATUS_COLOR[inc.status]}40`, letterSpacing:1 }}>{inc.status}</span>
+                      {isUnknown && (
+                        <span style={{ fontFamily:"monospace", fontSize:9, color:"#FF6D00", background:"rgba(255,109,0,0.12)", padding:"2px 8px", borderRadius:3, border:"1px solid rgba(255,109,0,0.3)", letterSpacing:1, animation:"pulse 2s infinite" }}>UNKNOWN THREAT</span>
+                      )}
                     </div>
-                    <div style={{ display:"flex", gap:16, flexWrap:"wrap" }}>
-                      <div style={{ fontSize:11, color:"#8899AA" }}>
-                        <span style={{ color:"#546E7A" }}>IPs: </span>
-                        {(inc.affected_ips||[]).map(ip => <span key={ip} style={{ color:"#4FC3F7", marginRight:8 }}>{ip}</span>)}
-                      </div>
-                      <div style={{ fontSize:11, color:"#8899AA" }}>
-                        <span style={{ color:"#546E7A" }}>MITRE: </span>
-                        {(inc.mitre_techniques||[]).map(m => <span key={m} style={{ color:"#FFD740", marginRight:8 }}>{m}</span>)}
-                      </div>
-                    </div>
-                    <div style={{marginTop:8, fontSize:10, color:"#546E7A", fontFamily:"monospace"}}>click to investigate →</div>
+                    <div style={{ fontSize:13, color:"#E2E8F0", fontWeight:500 }}>{inc.title}</div>
                   </div>
-                ))}
+                  <div style={{ textAlign:"right", fontFamily:"monospace", fontSize:10, color:"#546E7A", whiteSpace:"nowrap", marginLeft:12 }}>{ago(inc.created_at)}</div>
+                </div>
+                <div style={{ display:"flex", gap:16, flexWrap:"wrap", marginBottom:6 }}>
+                  <div style={{ fontSize:11, color:"#8899AA" }}>
+                    <span style={{ color:"#546E7A" }}>IPs: </span>
+                    {(inc.affected_ips||[]).map(ip => <span key={ip} style={{ color:"#4FC3F7", marginRight:8, fontFamily:"monospace" }}>{ip}</span>)}
+                  </div>
+                  <div style={{ fontSize:11, color:"#8899AA" }}>
+                    <span style={{ color:"#546E7A" }}>MITRE: </span>
+                    {isUnknown
+                      ? <span style={{ color:"#FF6D00" }}>AI CLASSIFYING — no technique mapped</span>
+                      : (inc.mitre_techniques||[]).map(m => <span key={m} style={{ color:"#FFD740", marginRight:8, fontFamily:"monospace" }}>{m}</span>)
+                    }
+                  </div>
+                </div>
+                {inc.investigation_summary && (
+                  <div style={{ fontSize:10, color:"#8899AA", fontFamily:"monospace", background:"rgba(5,13,21,0.5)", border:"1px solid rgba(79,195,247,0.08)", borderRadius:4, padding:"6px 10px", maxHeight:44, overflow:"hidden", lineHeight:1.6, marginBottom:6 }}>
+                    {inc.investigation_summary.substring(0,160)}{inc.investigation_summary.length>160?"…":""}
+                  </div>
+                )}
+                <div style={{ fontSize:10, color:"#38516A", fontFamily:"monospace" }}>click to investigate →</div>
               </div>
-            </Panel>
-          </div>
-        )}
+            );
+          }
+
+          return (
+            <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+              {/* Status metric row */}
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:12 }}>
+                {Object.entries(STATUS_COLOR).map(([s,c]) => (
+                  <MetricCard key={s} label={s} icon="" color={c}
+                    value={allInc.filter(i=>i.status===s).length}
+                    sub={`${s.toLowerCase()}`}/>
+                ))}
+                <MetricCard label="Unknown Threats" color="#FF6D00" value={unknownInc.length} live={unknownInc.length>0} icon="❓"/>
+              </div>
+
+              {/* Unknown incidents — top priority */}
+              {unknownInc.length > 0 && (
+                <div>
+                  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+                    <ThreatDot color="#FF6D00" size={5}/>
+                    <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:11, color:"#FF6D00", letterSpacing:2 }}>UNKNOWN THREAT INCIDENTS — AI CLASSIFICATION REQUIRED</span>
+                    <span style={{ marginLeft:"auto", fontFamily:"monospace", fontSize:9, color:"#546E7A" }}>{unknownInc.length} unclassified</span>
+                  </div>
+                  <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                    {unknownInc.map(inc => <IncCard key={inc.incident_id} inc={inc}/>)}
+                  </div>
+                </div>
+              )}
+
+              {/* Separator */}
+              {unknownInc.length > 0 && knownInc.length > 0 && (
+                <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                  <div style={{ flex:1, height:1, background:"rgba(79,195,247,0.08)" }}/>
+                  <span style={{ fontFamily:"monospace", fontSize:9, color:"#546E7A", letterSpacing:2 }}>MITRE ATT&CK MAPPED INCIDENTS</span>
+                  <div style={{ flex:1, height:1, background:"rgba(79,195,247,0.08)" }}/>
+                </div>
+              )}
+
+              {/* Known incidents */}
+              {allInc.length === 0 ? (
+                <div className="dash-panel" style={{ background:"rgba(7,16,27,0.8)", backdropFilter:"blur(12px)", border:"1px solid rgba(79,195,247,0.1)", borderRadius:12, padding:"50px 0", textAlign:"center", color:"#546E7A", fontFamily:"monospace", fontSize:12 }}>
+                  {invPaused
+                    ? "AI investigations paused — enable via top bar toggle"
+                    : "No incidents yet — AI investigation creates incidents after each alert (every 60s)"}
+                </div>
+              ) : (
+                <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                  {knownInc.map(inc => <IncCard key={inc.incident_id} inc={inc}/>)}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* ── THREAT INTEL TAB ── */}
         {tab==="intel" && (
@@ -1015,6 +1662,466 @@ export default function SOCDashboard() {
           </div>
         )}
 
+        {/* ── THREAT FEED TAB ── */}
+        {tab==="threatfeed" && (() => {
+          const feedAlerts = apiLive ? (data.alerts||[]) : MOCK.alerts;
+
+          // ── MITRE technique → tactic + kill chain phase ─────────────────────
+          const TACTIC_MAP = {
+            "T1190":   { tactic:"Initial Access",    phase:0, icon:"🚪" },
+            "T1059.004":{ tactic:"Execution",        phase:1, icon:"⚡" },
+            "T1027":   { tactic:"Defense Evasion",   phase:2, icon:"🕵️" },
+            "T1205":   { tactic:"Defense Evasion",   phase:2, icon:"🕵️" },
+            "T1564.004":{ tactic:"Defense Evasion",  phase:2, icon:"🕵️" },
+            "T1110.001":{ tactic:"Credential Access",phase:3, icon:"🔑" },
+            "T1110.003":{ tactic:"Credential Access",phase:3, icon:"🔑" },
+            "T1046":   { tactic:"Discovery",         phase:4, icon:"🔍" },
+            "T1021.001":{ tactic:"Lateral Movement", phase:5, icon:"↔️" },
+            "T1021.002":{ tactic:"Lateral Movement", phase:5, icon:"↔️" },
+            "T1071.001":{ tactic:"Command & Control",phase:6, icon:"📡" },
+            "T1071.004":{ tactic:"Command & Control",phase:6, icon:"📡" },
+            "T1572":   { tactic:"Command & Control", phase:6, icon:"📡" },
+            "T1090.003":{ tactic:"Command & Control",phase:6, icon:"📡" },
+            "T1048.003":{ tactic:"Exfiltration",     phase:7, icon:"📤" },
+          };
+          const KILL_CHAIN = [
+            { label:"Initial Access",    phase:0, icon:"🚪" },
+            { label:"Execution",         phase:1, icon:"⚡" },
+            { label:"Defense Evasion",   phase:2, icon:"🕵️" },
+            { label:"Credential Access", phase:3, icon:"🔑" },
+            { label:"Discovery",         phase:4, icon:"🔍" },
+            { label:"Lateral Movement",  phase:5, icon:"↔️" },
+            { label:"C2",                phase:6, icon:"📡" },
+            { label:"Exfiltration",      phase:7, icon:"📤" },
+          ];
+
+          // Active phases from current alerts
+          const activePhases = new Set(
+            feedAlerts
+              .map(a => TACTIC_MAP[a.mitre_technique]?.phase)
+              .filter(p => p != null)
+          );
+
+          // ── Alert velocity: 5-min buckets for last hour ─────────────────────
+          const now = Date.now();
+          const BUCKETS = 12;
+          const velocityBuckets = Array.from({length:BUCKETS}, (_,i) => ({
+            label: `${(BUCKETS-1-i)*5}m`,
+            count: 0,
+          }));
+          feedAlerts.forEach(a => {
+            const age = (now - new Date(a.timestamp).getTime()) / 60000; // minutes
+            const idx = Math.floor(age / 5);
+            if (idx >= 0 && idx < BUCKETS) velocityBuckets[BUCKETS-1-idx].count++;
+          });
+          const maxVelocity = Math.max(...velocityBuckets.map(b => b.count), 1);
+
+          // ── IP campaign detection: ≥2 alerts from same src_ip ──────────────
+          const ipCount = {};
+          feedAlerts.forEach(a => { if (a.src_ip) ipCount[a.src_ip] = (ipCount[a.src_ip]||0)+1; });
+          const campaignIPs = new Set(Object.keys(ipCount).filter(ip => ipCount[ip] >= 2));
+
+          // ── Filtering ───────────────────────────────────────────────────────
+          const searchLower = feedSearch.toLowerCase();
+          const filtered = feedAlerts.filter(a => {
+            if (feedFilter !== "ALL" && a.severity !== feedFilter) return false;
+            if (searchLower) {
+              const haystack = [a.type, a.src_ip, a.dst_ip, a.mitre_technique, ...(a.suspicion_reasons||[])].join(" ").toLowerCase();
+              if (!haystack.includes(searchLower)) return false;
+            }
+            return true;
+          });
+          const unknownFiltered = filtered.filter(a => !a.mitre_technique || a.mitre_technique === "UNKNOWN" || a.mitre_technique === "");
+          const knownFiltered   = filtered.filter(a =>  a.mitre_technique && a.mitre_technique !== "UNKNOWN" && a.mitre_technique !== "");
+
+          // ── Ticker items: newest 8 alerts ───────────────────────────────────
+          const tickerItems = [...feedAlerts].sort((a,b) => new Date(b.timestamp)-new Date(a.timestamp)).slice(0,8);
+
+          // ── ThreatCard component ─────────────────────────────────────────────
+          function ThreatCard({ a, idx }) {
+            const isUnknown  = !a.mitre_technique || a.mitre_technique === "UNKNOWN" || a.mitre_technique === "";
+            const accentLeft = isUnknown ? "#FF6D00" : (SEV_COLOR[a.severity]||"#4FC3F7");
+            const cardBg     = isUnknown ? "rgba(255,109,0,0.04)" : (SEV_BG[a.severity]||"rgba(79,195,247,0.04)");
+            const cardBorder = isUnknown ? "rgba(255,109,0,0.35)" : `${SEV_COLOR[a.severity]||"#4FC3F7"}35`;
+            const cardId     = a.id || `${a.src_ip}-${a.type}-${idx}`;
+            const isExpanded = expandedCard === cardId;
+            const isCampaign = campaignIPs.has(a.src_ip);
+            const tactic     = TACTIC_MAP[a.mitre_technique];
+            const playbook   = MITRE_PLAYBOOK[a.mitre_technique];
+            const reasons    = Array.isArray(a.suspicion_reasons) ? a.suspicion_reasons
+              : (a.reasons ? (Array.isArray(a.reasons) ? a.reasons : [a.reasons]) : []);
+            const hasProfile = (a.anomaly_score != null && a.anomaly_score > 0) || a.avg_bytes_per_min != null || a.avg_entropy != null;
+            const tsAge      = now - new Date(a.timestamp).getTime();
+            const ageColor   = tsAge < 5*60000 ? "#E53935" : tsAge < 30*60000 ? "#FF6D00" : "#546E7A";
+
+            return (
+              <div
+                onClick={() => setExpandedCard(isExpanded ? null : cardId)}
+                style={{
+                  background: cardBg,
+                  border: `1px solid ${isExpanded ? accentLeft+"88" : cardBorder}`,
+                  borderLeft: `4px solid ${accentLeft}`,
+                  borderRadius: 10,
+                  padding: "16px 20px",
+                  display: "flex", flexDirection: "column", gap: 10,
+                  cursor: "pointer",
+                  transition: "border-color 0.2s",
+                  position: "relative",
+                }}>
+
+                {/* Campaign badge */}
+                {isCampaign && (
+                  <div style={{
+                    position:"absolute", top:10, right:12,
+                    fontFamily:"monospace", fontSize:8, letterSpacing:1,
+                    color:"#FFD740", background:"rgba(255,215,64,0.1)",
+                    padding:"2px 7px", borderRadius:3, border:"1px solid rgba(255,215,64,0.25)",
+                  }}>
+                    CAMPAIGN · {ipCount[a.src_ip]} alerts
+                  </div>
+                )}
+
+                {/* Row 1 — header */}
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:8 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+                    <ThreatDot color={accentLeft} size={6}/>
+                    <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:13, fontWeight:700, color:accentLeft, letterSpacing:0.5 }}>
+                      {a.type?.replace(/_DETECTED$/,"").replace(/_/g," ") || "UNKNOWN THREAT"}
+                    </span>
+                    <SevBadge s={a.severity||"MEDIUM"}/>
+                    {isUnknown ? (
+                      <span style={{ fontFamily:"monospace", fontSize:9, color:"#FF6D00", background:"rgba(255,109,0,0.12)", padding:"2px 8px", borderRadius:3, border:"1px solid rgba(255,109,0,0.3)", letterSpacing:1, fontWeight:700, animation:"pulse 2s infinite" }}>
+                        UNKNOWN — AI CLASSIFYING
+                      </span>
+                    ) : (
+                      <span style={{ fontFamily:"monospace", fontSize:9, color:"#FFD740", background:"rgba(255,215,64,0.08)", padding:"2px 8px", borderRadius:3, border:"1px solid rgba(255,215,64,0.2)" }}>
+                        {a.mitre_technique}
+                      </span>
+                    )}
+                    {tactic && (
+                      <span style={{ fontFamily:"monospace", fontSize:9, color:"#78909C", background:"rgba(255,255,255,0.04)", padding:"2px 8px", borderRadius:3, border:"1px solid rgba(255,255,255,0.06)" }}>
+                        {tactic.icon} {tactic.tactic}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                    <span style={{ fontFamily:"monospace", fontSize:10, color:ageColor }}>{ago(a.timestamp)}</span>
+                    <span style={{ fontFamily:"monospace", fontSize:10, color:"#546E7A" }}>{isExpanded ? "▲" : "▼"}</span>
+                  </div>
+                </div>
+
+                {/* Row 2 — network flow */}
+                <div style={{ display:"flex", alignItems:"center", gap:8, fontFamily:"'Share Tech Mono',monospace", fontSize:12 }}>
+                  <span style={{ color:"#4FC3F7", background:"rgba(79,195,247,0.1)", padding:"3px 10px", borderRadius:4 }}>
+                    {a.src_ip||"?"}:{a.src_port||"?"}
+                  </span>
+                  <span style={{ color:"#546E7A", fontSize:16 }}>→</span>
+                  <span style={{ color:"#CBD5E1", background:"rgba(255,255,255,0.04)", padding:"3px 10px", borderRadius:4 }}>
+                    {a.dst_ip||"?"}:{a.dst_port||"?"}
+                  </span>
+                  <span style={{ fontFamily:"monospace", fontSize:10, color:"#546E7A", marginLeft:4 }}>{a.protocol||"TCP"}</span>
+                  {a.has_tls && <span style={{ fontSize:9, color:"#00E676", background:"rgba(0,230,118,0.1)", padding:"2px 6px", borderRadius:3, border:"1px solid rgba(0,230,118,0.2)" }}>TLS</span>}
+                  {/* Anomaly score bar */}
+                  {a.anomaly_score > 0 && (
+                    <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:6 }}>
+                      <span style={{ fontFamily:"monospace", fontSize:9, color:"#546E7A" }}>RISK</span>
+                      <div style={{ width:60, height:5, background:"rgba(255,255,255,0.08)", borderRadius:3, overflow:"hidden" }}>
+                        <div style={{ height:"100%", borderRadius:3, width:`${(a.anomaly_score||0)*100}%`, background: a.anomaly_score>0.85?"#E53935":a.anomaly_score>0.65?"#FF6D00":"#FFD740", transition:"width 0.5s" }}/>
+                      </div>
+                      <span style={{ fontFamily:"monospace", fontSize:9, color: a.anomaly_score>0.85?"#E53935":a.anomaly_score>0.65?"#FF6D00":"#FFD740" }}>
+                        {((a.anomaly_score||0)*100).toFixed(0)}%
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Evidence pills — always visible */}
+                {reasons.length > 0 && (
+                  <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
+                    <span style={{ fontSize:9, color:"#546E7A", fontFamily:"monospace", alignSelf:"center", letterSpacing:1 }}>EVIDENCE:</span>
+                    {reasons.slice(0, isExpanded ? reasons.length : 4).map((r,i) => (
+                      <span key={i} style={{
+                        fontFamily:"monospace", fontSize:9,
+                        color: isUnknown ? "#FF9800" : "#8899AA",
+                        background: isUnknown ? "rgba(255,152,0,0.08)" : "rgba(255,255,255,0.04)",
+                        padding:"2px 7px", borderRadius:3,
+                        border: isUnknown ? "1px solid rgba(255,152,0,0.2)" : "1px solid rgba(255,255,255,0.06)",
+                      }}>{r}</span>
+                    ))}
+                    {!isExpanded && reasons.length > 4 && <span style={{ fontSize:9, color:"#546E7A", fontFamily:"monospace" }}>+{reasons.length-4} more</span>}
+                  </div>
+                )}
+
+                {/* ── EXPANDED DETAIL ────────────────────────────────────────── */}
+                {isExpanded && (
+                  <div style={{ display:"flex", flexDirection:"column", gap:10, borderTop:`1px solid ${accentLeft}22`, paddingTop:10, marginTop:2 }}>
+
+                    {/* AI investigation summary */}
+                    {(a.description || a.investigation_summary) && (
+                      <div style={{ background:"rgba(5,13,21,0.6)", border:"1px solid rgba(79,195,247,0.12)", borderRadius:6, padding:"10px 14px" }}>
+                        <span style={{ fontFamily:"monospace", fontSize:9, color:"#4FC3F7", letterSpacing:1, display:"block", marginBottom:6 }}>
+                          {isUnknown ? "AI CLASSIFICATION PENDING" : "AI INVESTIGATION SUMMARY"}
+                        </span>
+                        <div style={{ fontSize:11, color:"#CBD5E1", lineHeight:1.8, fontFamily:"monospace", whiteSpace:"pre-wrap" }}>
+                          {(a.investigation_summary || a.description || "")}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Behavioral profile row */}
+                    {hasProfile && (
+                      <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                        <span style={{ fontSize:9, color:"#546E7A", fontFamily:"monospace", alignSelf:"center", letterSpacing:1 }}>BEHAVIOR:</span>
+                        {a.avg_bytes_per_min > 0 && (
+                          <span style={{ fontFamily:"monospace", fontSize:10, color:"#8899AA", background:"rgba(5,13,21,0.6)", padding:"3px 8px", borderRadius:3, border:"1px solid rgba(255,255,255,0.06)" }}>
+                            ↑ {(a.avg_bytes_per_min/1000).toFixed(1)} KB/min
+                          </span>
+                        )}
+                        {a.avg_entropy > 0 && (
+                          <span style={{ fontFamily:"monospace", fontSize:10, color: a.avg_entropy>7.5?"#E53935":a.avg_entropy>6.5?"#FF6D00":"#8899AA", background:"rgba(5,13,21,0.6)", padding:"3px 8px", borderRadius:3, border:"1px solid rgba(255,255,255,0.06)" }}>
+                            entropy {(a.avg_entropy||0).toFixed(2)}
+                          </span>
+                        )}
+                        {a.observation_count > 0 && (
+                          <span style={{ fontFamily:"monospace", fontSize:10, color:"#8899AA", background:"rgba(5,13,21,0.6)", padding:"3px 8px", borderRadius:3, border:"1px solid rgba(255,255,255,0.06)" }}>
+                            {a.observation_count} packets observed
+                          </span>
+                        )}
+                        {a.payload_size > 0 && (
+                          <span style={{ fontFamily:"monospace", fontSize:10, color:"#8899AA", background:"rgba(5,13,21,0.6)", padding:"3px 8px", borderRadius:3, border:"1px solid rgba(255,255,255,0.06)" }}>
+                            payload {a.payload_size>1000000?`${(a.payload_size/1000000).toFixed(1)}MB`:a.payload_size>1000?`${(a.payload_size/1000).toFixed(0)}KB`:`${a.payload_size}B`}
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* MITRE playbook */}
+                    {playbook && (
+                      <div style={{ background:"rgba(255,215,64,0.03)", border:"1px solid rgba(255,215,64,0.15)", borderRadius:6, padding:"12px 14px" }}>
+                        <div style={{ fontFamily:"monospace", fontSize:9, color:"#FFD740", letterSpacing:1, marginBottom:8 }}>
+                          MITRE {a.mitre_technique} — {playbook.name} — RESPONSE PLAYBOOK
+                        </div>
+                        {playbook.steps.map((step, i) => (
+                          <div key={i} style={{ display:"flex", gap:10, marginBottom:6 }}>
+                            <span style={{
+                              fontFamily:"monospace", fontSize:9, fontWeight:700, minWidth:14,
+                              color: i===0?"#E53935":i===1?"#FF6D00":"#546E7A",
+                            }}>{i+1}.</span>
+                            <span style={{ fontFamily:"monospace", fontSize:10, color:"#8899AA", lineHeight:1.6 }}>{step}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Block recommendation */}
+                    {(a.block_recommended || isUnknown) && (
+                      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", background:"rgba(229,57,53,0.05)", border:"1px solid rgba(229,57,53,0.2)", borderRadius:6, padding:"8px 14px" }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                          <ThreatDot color="#E53935" size={5}/>
+                          <span style={{ fontFamily:"monospace", fontSize:10, color:"#E53935" }}>
+                            {isUnknown ? "UNKNOWN THREAT — Human review required before any action" : "Block recommended — pending analyst decision"}
+                          </span>
+                        </div>
+                        <span style={{ fontFamily:"monospace", fontSize:9, color:"#546E7A" }}>→ RESPONSE tab</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          }
+
+          return (
+            <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+
+              {/* ── LIVE THREAT TICKER ──────────────────────────────────────── */}
+              {tickerItems.length > 0 && (
+                <div style={{
+                  background:"rgba(5,13,21,0.8)", border:`1px solid ${ACCENT}33`,
+                  borderRadius:6, padding:"6px 12px", overflow:"hidden", position:"relative",
+                }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                    <span style={{ fontFamily:"monospace", fontSize:9, color:ACCENT, letterSpacing:2, whiteSpace:"nowrap", borderRight:`1px solid ${ACCENT}44`, paddingRight:10, marginRight:2 }}>
+                      LIVE FEED
+                    </span>
+                    <div style={{ overflow:"hidden", flex:1 }}>
+                      <div style={{ display:"flex", gap:24, animation:"ticker 30s linear infinite", whiteSpace:"nowrap" }}>
+                        {[...tickerItems, ...tickerItems].map((a,i) => (
+                          <span key={i} style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:10, display:"inline-flex", alignItems:"center", gap:8 }}>
+                            <span style={{ color:SEV_COLOR[a.severity]||"#4FC3F7", fontWeight:700 }}>◉</span>
+                            <span style={{ color:"#CBD5E1" }}>{a.type?.replace(/_DETECTED$/,"").replace(/_/g," ")}</span>
+                            <span style={{ color:"#546E7A" }}>{a.src_ip}</span>
+                            <span style={{ color:"#38516A" }}>·</span>
+                            <span style={{ color:"#546E7A", fontSize:9 }}>{ago(a.timestamp)}</span>
+                            <span style={{ color:"#38516A", marginLeft:8 }}>│</span>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ── METRICS ROW ─────────────────────────────────────────────── */}
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12 }}>
+                <MetricCard label="Total Alerts" value={feedAlerts.length} color="#4FC3F7" live icon="📡"/>
+                <MetricCard label="Novel Threats" value={feedAlerts.filter(a=>!a.mitre_technique||a.mitre_technique===""||a.mitre_technique==="UNKNOWN").length} color="#FF6D00" live={feedAlerts.some(a=>!a.mitre_technique)} icon="❓"/>
+                <MetricCard label="MITRE-Mapped" value={feedAlerts.filter(a=>a.mitre_technique&&a.mitre_technique!=="UNKNOWN"&&a.mitre_technique!=="").length} color="#00E676" icon="🗺️"/>
+                <MetricCard label="Critical / High" value={feedAlerts.filter(a=>a.severity==="CRITICAL"||a.severity==="HIGH").length} color="#E53935" live icon="🚨"/>
+              </div>
+
+              {/* ── KILL CHAIN + VELOCITY ROW ───────────────────────────────── */}
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 260px", gap:12 }}>
+
+                {/* Kill Chain */}
+                <div style={{ background:"rgba(5,13,21,0.6)", border:"1px solid rgba(79,195,247,0.1)", borderRadius:8, padding:"14px 18px" }}>
+                  <div style={{ fontFamily:"monospace", fontSize:9, color:"#546E7A", letterSpacing:2, marginBottom:12 }}>MITRE ATT&CK KILL CHAIN — ACTIVE PHASES</div>
+                  <div style={{ display:"flex", alignItems:"stretch", gap:0 }}>
+                    {KILL_CHAIN.map((phase, i) => {
+                      const active = activePhases.has(phase.phase);
+                      return (
+                        <div key={i} style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:6, position:"relative" }}>
+                          {/* Connector line */}
+                          {i < KILL_CHAIN.length-1 && (
+                            <div style={{
+                              position:"absolute", top:16, left:"50%", right:"-50%",
+                              height:2, background: active?"rgba(229,57,53,0.4)":"rgba(255,255,255,0.06)", zIndex:0,
+                            }}/>
+                          )}
+                          {/* Phase node */}
+                          <div style={{
+                            width:32, height:32, borderRadius:"50%", zIndex:1,
+                            display:"flex", alignItems:"center", justifyContent:"center",
+                            fontSize:14,
+                            background: active ? "rgba(229,57,53,0.15)" : "rgba(255,255,255,0.04)",
+                            border: active ? "2px solid #E53935" : "2px solid rgba(255,255,255,0.08)",
+                            boxShadow: active ? "0 0 12px rgba(229,57,53,0.4)" : "none",
+                            animation: active ? "pulse 2s infinite" : "none",
+                          }}>{phase.icon}</div>
+                          <div style={{
+                            fontFamily:"monospace", fontSize:8, textAlign:"center", letterSpacing:0.3,
+                            color: active ? "#E53935" : "#38516A",
+                            fontWeight: active ? 700 : 400,
+                            lineHeight:1.3,
+                          }}>
+                            {phase.label.split(" ").join("\n")}
+                          </div>
+                          {active && (
+                            <div style={{ width:6, height:6, borderRadius:"50%", background:"#E53935", animation:"pulse 1s infinite" }}/>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Alert Velocity chart */}
+                <div style={{ background:"rgba(5,13,21,0.6)", border:"1px solid rgba(79,195,247,0.1)", borderRadius:8, padding:"14px 18px" }}>
+                  <div style={{ fontFamily:"monospace", fontSize:9, color:"#546E7A", letterSpacing:2, marginBottom:12 }}>ALERT VELOCITY — LAST HOUR</div>
+                  <div style={{ display:"flex", alignItems:"flex-end", gap:3, height:60 }}>
+                    {velocityBuckets.map((b,i) => {
+                      const h = Math.max(3, (b.count / maxVelocity) * 54);
+                      const isRecent = i >= BUCKETS-3;
+                      return (
+                        <div key={i} style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:2 }}>
+                          <div style={{
+                            width:"100%", height:h, borderRadius:"2px 2px 0 0",
+                            background: isRecent
+                              ? (b.count>0 ? "#E53935" : "rgba(229,57,53,0.2)")
+                              : (b.count>0 ? ACCENT : `${ACCENT}22`),
+                            transition:"height 0.4s",
+                          }}/>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div style={{ display:"flex", justifyContent:"space-between", marginTop:6 }}>
+                    <span style={{ fontFamily:"monospace", fontSize:8, color:"#38516A" }}>60m ago</span>
+                    <span style={{ fontFamily:"monospace", fontSize:8, color:"#38516A" }}>now</span>
+                  </div>
+                  <div style={{ marginTop:6, fontFamily:"monospace", fontSize:9, color:ACCENT, textAlign:"center" }}>
+                    {velocityBuckets.slice(-3).reduce((s,b)=>s+b.count,0)} alerts in last 15 min
+                  </div>
+                </div>
+              </div>
+
+              {/* ── FILTER BAR ──────────────────────────────────────────────── */}
+              <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+                <span style={{ fontFamily:"monospace", fontSize:9, color:"#546E7A", letterSpacing:1 }}>FILTER:</span>
+                {["ALL","CRITICAL","HIGH","MEDIUM","LOW"].map(f => (
+                  <button key={f} onClick={e=>{e.stopPropagation();setFeedFilter(f);}} style={{
+                    fontFamily:"monospace", fontSize:9, padding:"3px 10px", borderRadius:3, cursor:"pointer",
+                    background: feedFilter===f ? (f==="ALL"?ACCENT:SEV_COLOR[f]||ACCENT)+"22" : "rgba(255,255,255,0.04)",
+                    border: feedFilter===f ? `1px solid ${f==="ALL"?ACCENT:SEV_COLOR[f]||ACCENT}` : "1px solid rgba(255,255,255,0.08)",
+                    color: feedFilter===f ? (f==="ALL"?ACCENT:SEV_COLOR[f]||ACCENT) : "#546E7A",
+                    letterSpacing:1, fontWeight: feedFilter===f?700:400,
+                  }}>{f}</button>
+                ))}
+                <div style={{ flex:1, minWidth:160, display:"flex", alignItems:"center", gap:6,
+                  background:"rgba(255,255,255,0.04)", border:"1px solid rgba(255,255,255,0.08)",
+                  borderRadius:4, padding:"4px 10px" }}>
+                  <span style={{ color:"#546E7A", fontSize:11 }}>⌕</span>
+                  <input
+                    value={feedSearch}
+                    onChange={e=>setFeedSearch(e.target.value)}
+                    placeholder="Search IP, type, MITRE..."
+                    onClick={e=>e.stopPropagation()}
+                    style={{ background:"transparent", border:"none", outline:"none", flex:1,
+                      fontFamily:"monospace", fontSize:10, color:"#CBD5E1" }}
+                  />
+                  {feedSearch && <button onClick={e=>{e.stopPropagation();setFeedSearch("");}} style={{ background:"none",border:"none",cursor:"pointer",color:"#546E7A",fontSize:11 }}>✕</button>}
+                </div>
+                <span style={{ fontFamily:"monospace", fontSize:9, color:"#546E7A", marginLeft:"auto" }}>
+                  {filtered.length} / {feedAlerts.length} shown
+                </span>
+              </div>
+
+              {/* ── UNKNOWN / NOVEL THREATS ─────────────────────────────────── */}
+              {unknownFiltered.length > 0 && (
+                <div>
+                  <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:10 }}>
+                    <ThreatDot color="#FF6D00" size={6}/>
+                    <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:11, color:"#FF6D00", letterSpacing:2 }}>
+                      NOVEL / UNCLASSIFIED THREATS — AI REVIEW REQUIRED
+                    </span>
+                    <span style={{ fontFamily:"monospace", fontSize:9, color:"#546E7A", marginLeft:"auto" }}>{unknownFiltered.length} unclassified</span>
+                  </div>
+                  <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                    {unknownFiltered.map((a,i) => <ThreatCard key={a.id||`u${i}`} a={a} idx={i}/>)}
+                  </div>
+                </div>
+              )}
+
+              {/* ── SEPARATOR ───────────────────────────────────────────────── */}
+              {unknownFiltered.length > 0 && knownFiltered.length > 0 && (
+                <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                  <div style={{ flex:1, height:"1px", background:"rgba(79,195,247,0.08)" }}/>
+                  <span style={{ fontFamily:"monospace", fontSize:9, color:"#546E7A", letterSpacing:2 }}>MITRE ATT&CK MAPPED THREATS</span>
+                  <div style={{ flex:1, height:"1px", background:"rgba(79,195,247,0.08)" }}/>
+                </div>
+              )}
+
+              {/* ── KNOWN THREATS ───────────────────────────────────────────── */}
+              {knownFiltered.length > 0 && (
+                <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                  {knownFiltered.map((a,i) => <ThreatCard key={a.id||`k${i}`} a={a} idx={i}/>)}
+                </div>
+              )}
+
+              {/* ── EMPTY STATE ─────────────────────────────────────────────── */}
+              {filtered.length === 0 && (
+                <div style={{ textAlign:"center", padding:"60px 0", color:"#546E7A", fontFamily:"monospace", fontSize:13 }}>
+                  <div style={{ fontSize:32, marginBottom:12 }}>📡</div>
+                  <div>{feedAlerts.length > 0 ? "No threats match current filters" : "No threats detected yet"}</div>
+                  <div style={{ fontSize:11, marginTop:8, color:"#38516A" }}>
+                    {feedAlerts.length > 0 ? "Try clearing the search or changing severity filter" : "Threat cards appear here as RLM scores anomalies"}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
       </div>
 
       {/* ── INCIDENT DETAIL DRAWER ── */}
@@ -1095,60 +2202,151 @@ export default function SOCDashboard() {
               </div>
 
               {/* Section: AI Investigation Summary */}
-              <div>
-                <div style={{ fontSize:11, color:"#4FC3F7", fontFamily:"monospace", letterSpacing:1, marginBottom:10, textTransform:"uppercase" }}>AI Investigation Summary</div>
-                {(() => {
-                  const aiSummary = incidentDetail?.investigation_summary || selectedIncident?.investigation_summary;
-                  return aiSummary ? (
-                    <div style={{ background:"rgba(5,13,21,0.6)", border:"1px solid rgba(79,195,247,0.1)", borderRadius:6, padding:"14px 16px", fontSize:11, color:"#CBD5E1", lineHeight:1.8, fontFamily:"monospace", whiteSpace:"pre-wrap", maxHeight:200, overflowY:"auto" }}>
-                      {aiSummary}
-                    </div>
-                  ) : (
-                    <div style={{ background:"rgba(5,13,21,0.4)", border:"1px solid rgba(84,110,122,0.2)", borderRadius:6, padding:"14px 16px", fontSize:11, color:"#546E7A", fontFamily:"monospace", fontStyle:"italic" }}>
-                      No AI investigation was run for this alert (investigations were paused when alert arrived).
-                    </div>
-                  );
-                })()}
-              </div>
+              {(() => {
+                const aiSummary = incidentDetail?.investigation_summary || selectedIncident?.investigation_summary;
+                const isPending = !aiSummary || aiSummary.startsWith('⏸');
+                const sev       = selectedIncident?.severity || 'MEDIUM';
+                const sevColor  = sev==='CRITICAL'?'#FF5252':sev==='HIGH'?'#FF6D00':sev==='MEDIUM'?'#FFD740':'#78909C';
+                const mitre     = (selectedIncident?.mitre_techniques||[])[0] || selectedIncident?.mitre_technique || '—';
+                const score     = selectedIncident?.anomaly_score;
+                const affIPs    = selectedIncident?.affected_ips || [];
 
-              {/* Section: Remediation */}
+                return (
+                  <div>
+                    {/* Header row */}
+                    <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:12 }}>
+                      <div style={{ fontSize:11, color:"#4FC3F7", fontFamily:"monospace",
+                        letterSpacing:1, textTransform:"uppercase" }}>AI Investigation</div>
+                      <div style={{ display:"flex", alignItems:"center", gap:6, marginLeft:"auto" }}>
+                        <div style={{ width:6, height:6, borderRadius:"50%",
+                          background: isPending ? "#FFD740" : "#00E676",
+                          boxShadow: isPending ? "0 0 8px #FFD740" : "0 0 8px #00E676" }}/>
+                        <span style={{ fontFamily:"monospace", fontSize:9,
+                          color: isPending ? "#FFD740" : "#00E676", letterSpacing:1 }}>
+                          {isPending ? "PENDING" : "COMPLETE"}
+                        </span>
+                      </div>
+                    </div>
+
+                    {isPending ? (
+                      <div style={{ background:"rgba(255,215,64,0.04)", border:"1px solid rgba(255,215,64,0.2)",
+                        borderRadius:8, padding:"16px", fontSize:11, color:"#90A4AE",
+                        fontFamily:"monospace", lineHeight:1.8 }}>
+                        <div style={{ color:"#FFD740", marginBottom:8, fontSize:10 }}>
+                          ⏸ AI Investigation Paused
+                        </div>
+                        AI investigation was disabled when this alert arrived. Enable AI Investigation
+                        and new alerts from this host will be fully analysed automatically.
+                        {score != null && (
+                          <div style={{ marginTop:10, color:"#607D8B", fontSize:10 }}>
+                            Anomaly score logged: <span style={{ color:"#FFD740" }}>{score.toFixed(2)}</span>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+
+                        {/* Verdict banner */}
+                        <div style={{ background:`${sevColor}0D`, border:`1px solid ${sevColor}35`,
+                          borderLeft:`3px solid ${sevColor}`, borderRadius:6, padding:"10px 14px",
+                          display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
+                          <span style={{ fontFamily:"monospace", fontSize:10, color:sevColor,
+                            letterSpacing:1, fontWeight:700 }}>{sev} THREAT</span>
+                          {mitre !== '—' && (
+                            <span style={{ fontFamily:"monospace", fontSize:9,
+                              color:"#90CAF9", background:"rgba(144,202,249,0.1)",
+                              border:"1px solid rgba(144,202,249,0.2)",
+                              padding:"2px 8px", borderRadius:3 }}>{mitre}</span>
+                          )}
+                          {score != null && (
+                            <span style={{ fontFamily:"monospace", fontSize:9, color:"#607D8B",
+                              marginLeft:"auto" }}>
+                              anomaly <span style={{ color:sevColor }}>{score.toFixed(2)}</span>
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Affected IPs */}
+                        {affIPs.length > 0 && (
+                          <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                            {affIPs.map(ip => (
+                              <span key={ip} style={{ fontFamily:"monospace", fontSize:10,
+                                color:"#FF8A65", background:"rgba(255,138,101,0.08)",
+                                border:"1px solid rgba(255,138,101,0.2)",
+                                padding:"3px 10px", borderRadius:4 }}>🎯 {ip}</span>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Analysis text — strip any REMEDIATION: block (old data) */}
+                        <div style={{ background:"rgba(5,13,21,0.7)",
+                          border:"1px solid rgba(79,195,247,0.08)", borderRadius:6,
+                          padding:"14px 16px", fontSize:11, color:"#B0BEC5",
+                          lineHeight:1.9, fontFamily:"'DM Sans',sans-serif",
+                          whiteSpace:"pre-wrap", maxHeight:240, overflowY:"auto" }}>
+                          {aiSummary.replace(/REMEDIATION:[\s\S]*/i, '').trim() || aiSummary}
+                        </div>
+
+                        {/* Model badge */}
+                        <div style={{ display:"flex", alignItems:"center", gap:8,
+                          justifyContent:"flex-end" }}>
+                          <span style={{ fontFamily:"monospace", fontSize:9,
+                            color:"rgba(79,195,247,0.35)", letterSpacing:1 }}>
+                            🤖 GPT-4o mini · ~$0.0003/call
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* Section: Remediation — always a separate technical playbook, never from investigation_summary */}
               <div>
-                <div style={{ fontSize:11, color:"#4FC3F7", fontFamily:"monospace", letterSpacing:1, marginBottom:10, textTransform:"uppercase" }}>Remediation</div>
-                {(() => {
-                  // Priority: AI summary REMEDIATION block > generated AI > static playbook > fallback
-                  const summary = incidentDetail?.investigation_summary || '';
-                  const remIdx = summary.indexOf('REMEDIATION:');
-                  if (remIdx !== -1) {
-                    return (
-                      <div style={{ background:"rgba(102,187,106,0.04)", border:"1px solid rgba(102,187,106,0.2)", borderRadius:6, padding:"14px 16px", fontSize:11, color:"#CBD5E1", lineHeight:1.8, fontFamily:"monospace", whiteSpace:"pre-wrap" }}>
-                        {summary.substring(remIdx)}
-                      </div>
-                    );
-                  }
-                  if (generatedRemediation) {
-                    return (
-                      <div style={{ background:"rgba(102,187,106,0.04)", border:"1px solid rgba(102,187,106,0.2)", borderRadius:6, padding:"14px 16px", fontSize:11, color:"#CBD5E1", lineHeight:1.8, fontFamily:"monospace", whiteSpace:"pre-wrap" }}>
-                        {generatedRemediation}
-                      </div>
-                    );
-                  }
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}>
+                  <div style={{ fontSize:11, color:"#4FC3F7", fontFamily:"monospace", letterSpacing:1, textTransform:"uppercase" }}>
+                    Technical Playbook
+                    <span style={{ marginLeft:8, fontSize:9, color:"#546E7A", fontWeight:"normal", letterSpacing:0, textTransform:"none" }}>
+                      {generatedRemediation ? "AI-generated" : "static · click to generate AI version"}
+                    </span>
+                  </div>
+                  <button onClick={()=>{ setGeneratedRemediation(null); generateAIRemediation(); }}
+                    disabled={remediationLoading}
+                    style={{ padding:"4px 12px", background:"rgba(79,195,247,0.08)",
+                      border:"1px solid rgba(79,195,247,0.3)", borderRadius:4,
+                      color:"#4FC3F7", cursor:remediationLoading?"wait":"pointer",
+                      fontSize:10, fontFamily:"monospace", letterSpacing:0.5, flexShrink:0 }}>
+                    {remediationLoading ? "⟳ Generating…" : "⚡ Generate AI Playbook"}
+                  </button>
+                </div>
+
+                {generatedRemediation ? (
+                  /* AI-generated technical playbook (markdown-style) */
+                  <div style={{ background:"rgba(0,20,10,0.6)", border:"1px solid rgba(102,187,106,0.25)",
+                    borderRadius:6, padding:"16px 18px", fontSize:11, color:"#CBD5E1",
+                    lineHeight:1.85, fontFamily:"monospace", whiteSpace:"pre-wrap" }}>
+                    {generatedRemediation}
+                  </div>
+                ) : (() => {
+                  /* Static MITRE playbook while no AI version exists yet */
                   const mitre = (selectedIncident.mitre_techniques||[])[0];
                   const playbook = mitre ? (MITRE_PLAYBOOK[mitre] || MITRE_FALLBACK) : MITRE_FALLBACK;
                   const isGeneric = !mitre || !MITRE_PLAYBOOK[mitre];
                   return (
-                    <div>
-                      <div style={{ background:"rgba(102,187,106,0.04)", border:"1px solid rgba(102,187,106,0.15)", borderRadius:6, padding:"14px 16px", marginBottom:10 }}>
-                        {isGeneric && <div style={{ fontSize:9, color:"#FFD740", fontFamily:"monospace", marginBottom:8 }}>&#x26A0; GENERIC PLAYBOOK — click below for AI-specific guidance</div>}
-                        {playbook.steps.map((s,i) => (
-                          <div key={i} style={{ fontSize:11, color:"#CBD5E1", lineHeight:1.7, marginBottom:4, fontFamily:"monospace" }}>&#x2022; {s}</div>
-                        ))}
-                      </div>
+                    <div style={{ background:"rgba(102,187,106,0.03)", border:"1px solid rgba(102,187,106,0.12)",
+                      borderRadius:6, padding:"14px 16px" }}>
                       {isGeneric && (
-                        <button onClick={generateAIRemediation} disabled={remediationLoading}
-                          style={{ width:"100%", padding:"10px", background:"rgba(79,195,247,0.08)", border:"1px solid rgba(79,195,247,0.3)", borderRadius:4, color:"#4FC3F7", cursor:remediationLoading?"wait":"pointer", fontSize:11, fontFamily:"monospace" }}>
-                          {remediationLoading ? "Generating AI Remediation..." : "&#x26A1; Generate AI Remediation (1 API call)"}
-                        </button>
+                        <div style={{ fontSize:9, color:"#FFD740", fontFamily:"monospace",
+                          marginBottom:10, display:"flex", alignItems:"center", gap:6 }}>
+                          ⚠ Generic playbook — click "Generate AI Playbook" for commands specific to this incident
+                        </div>
                       )}
+                      {playbook.steps.map((s,i) => (
+                        <div key={i} style={{ fontSize:11, color:"#90A4AE", lineHeight:1.75,
+                          marginBottom:5, fontFamily:"monospace", display:"flex", gap:8 }}>
+                          <span style={{ color:"#4FC3F7", flexShrink:0 }}>›</span>{s}
+                        </div>
+                      ))}
                     </div>
                   );
                 })()}
@@ -1156,20 +2354,68 @@ export default function SOCDashboard() {
 
               {/* Section: ChromaDB Threat Signatures */}
               <div>
-                <div style={{ fontSize:11, color:"#4FC3F7", fontFamily:"monospace", letterSpacing:1, marginBottom:10, textTransform:"uppercase" }}>Threat Signatures — ChromaDB</div>
+                <div style={{ fontSize:11, color:"#4FC3F7", fontFamily:"monospace", letterSpacing:1, marginBottom:10, textTransform:"uppercase" }}>
+                  Threat Signatures — ChromaDB
+                  <span style={{ marginLeft:8, fontSize:9, color:"#546E7A", fontWeight:"normal", letterSpacing:0 }}>cosine similarity matches</span>
+                </div>
                 {threatSigs.length > 0 ? (
                   <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-                    {threatSigs.slice(0,3).map((sig,i) => (
-                      <div key={i} style={{ background:"rgba(79,195,247,0.03)", border:"1px solid rgba(79,195,247,0.1)", borderRadius:6, padding:"10px 14px" }}>
-                        <div style={{ display:"flex", gap:8, alignItems:"flex-start" }}>
-                          <span style={{ fontFamily:"monospace", fontSize:9, color:"#4FC3F7", background:"rgba(79,195,247,0.1)", padding:"2px 6px", borderRadius:2, marginTop:1, flexShrink:0 }}>{i+1}</span>
-                          <span style={{ fontSize:11, color:"#CBD5E1", lineHeight:1.6, fontFamily:"monospace" }}>{typeof sig==="string"?sig:JSON.stringify(sig)}</span>
+                    {threatSigs.slice(0,5).map((sig, i) => {
+                      const raw       = typeof sig === "string" ? {} : sig;
+                      const doc       = raw.document || raw.text || String(sig);
+                      const meta      = raw.metadata || {};
+                      const mitre     = meta.mitre || "—";
+                      const severity  = meta.severity || "UNKNOWN";
+                      const simScore  = raw.similarity != null ? raw.similarity : null;
+                      const simPct    = simScore != null ? (simScore * 100).toFixed(1) : null;
+                      const sevColor  = severity === "CRITICAL" ? "#FF5252"
+                                      : severity === "HIGH"     ? "#FF6D00"
+                                      : severity === "MEDIUM"   ? "#FFD740"
+                                      : "#78909C";
+                      // bar width — scores typically 0.30–0.70 range; normalise to 0–100 visually
+                      const barWidth  = simScore != null ? Math.min(100, (simScore / 0.8) * 100) : 0;
+                      return (
+                        <div key={i} style={{
+                          background:"rgba(5,12,22,0.8)", border:`1px solid ${sevColor}22`,
+                          borderLeft:`3px solid ${sevColor}`, borderRadius:6, padding:"12px 14px",
+                        }}>
+                          {/* Header row */}
+                          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8, flexWrap:"wrap" }}>
+                            <span style={{ fontFamily:"monospace", fontSize:9, color:"#4FC3F7",
+                              background:"rgba(79,195,247,0.1)", padding:"1px 7px", borderRadius:3 }}>#{i+1}</span>
+                            <span style={{ fontFamily:"monospace", fontSize:9, color:sevColor,
+                              background:`${sevColor}18`, border:`1px solid ${sevColor}30`,
+                              padding:"1px 8px", borderRadius:3, letterSpacing:0.5 }}>{severity}</span>
+                            <span style={{ fontFamily:"monospace", fontSize:9, color:"#90CAF9",
+                              background:"rgba(144,202,249,0.1)", border:"1px solid rgba(144,202,249,0.2)",
+                              padding:"1px 8px", borderRadius:3 }}>{mitre}</span>
+                            {simPct && (
+                              <span style={{ marginLeft:"auto", fontFamily:"monospace", fontSize:9,
+                                color:"#4FC3F7" }}>sim {simPct}%</span>
+                            )}
+                          </div>
+                          {/* Similarity bar */}
+                          {simPct && (
+                            <div style={{ height:3, background:"rgba(255,255,255,0.06)", borderRadius:2, marginBottom:9 }}>
+                              <div style={{ height:"100%", width:`${barWidth}%`, borderRadius:2,
+                                background:`linear-gradient(90deg,${sevColor}80,${sevColor})`,
+                                transition:"width 0.5s ease" }}/>
+                            </div>
+                          )}
+                          {/* Document text */}
+                          <div style={{ fontSize:11, color:"#90A4AE", lineHeight:1.7, fontFamily:"'DM Sans',sans-serif" }}>
+                            {doc}
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : (
-                  <div style={{ fontSize:11, color:"#546E7A", fontFamily:"monospace", fontStyle:"italic" }}>No matching signatures found in knowledge base.</div>
+                  <div style={{ fontSize:11, color:"#546E7A", fontFamily:"monospace", fontStyle:"italic",
+                    padding:"12px 14px", background:"rgba(5,12,22,0.6)", borderRadius:6,
+                    border:"1px solid rgba(79,195,247,0.06)" }}>
+                    No matching signatures found in ChromaDB knowledge base.
+                  </div>
                 )}
               </div>
 
@@ -1210,6 +2456,7 @@ export default function SOCDashboard() {
           <span>Risk: <span style={{color:riskColor}}>{riskPct}%</span></span>
         </div>
       </div>
+      </div>{/* end inner zIndex wrapper */}
     </div>
   );
 }

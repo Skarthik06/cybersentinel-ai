@@ -233,6 +233,12 @@ class RLMEngine:
         finally:
             await consumer.stop()
 
+    # IPs that belong to Docker internal networking — not real threats
+    _DOCKER_INFRA_PREFIXES = ("192.168.65.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.")
+
+    # Severity → anomaly score for fast-path alerts (no ChromaDB scoring)
+    _SEVERITY_SCORE = {"CRITICAL": 0.95, "HIGH": 0.82, "MEDIUM": 0.65, "LOW": 0.45}
+
     async def _process_packet_event(self, event: Dict[str, Any]):
         src_ip       = event.get("src_ip", "")
         dst_ip       = event.get("dst_ip", "")
@@ -242,24 +248,39 @@ class RLMEngine:
         entropy      = event.get("entropy", 0.0)
         timestamp    = event.get("timestamp", datetime.utcnow().isoformat())
 
+        # ── Skip Docker infrastructure IPs — not real threats ─────────────────
+        if any(src_ip.startswith(p) for p in self._DOCKER_INFRA_PREFIXES):
+            return
+
         profile = self._get_or_create_profile(src_ip, "host")
         await self._update_profile(
             profile, event, payload_size, entropy, protocol, dst_ip, dst_port, timestamp
         )
 
-        # ── Embedding cache check ─────────────────────────────────────────────
+        reasons = event.get("suspicion_reasons", [])
+
+        # ── Fast path: simulator packets with explicit suspicion_reasons ───────
+        # These packets carry ground-truth labels — bypass ChromaDB similarity.
+        # Deduplicate per (src_ip, alert_type) with a 5-minute Redis window so
+        # we emit once per burst rather than once per packet.
+        if reasons:
+            reason_type, reason_sev, _ = self._classify_from_reasons(reasons)
+            if reason_type:
+                dedup_key = f"rlm:reason:{src_ip}:{reason_type}"
+                if not await self.redis.exists(dedup_key):
+                    await self.redis.setex(dedup_key, 300, "1")
+                    profile.anomaly_score = self._SEVERITY_SCORE.get(reason_sev, 0.75)
+                    await self._emit_ml_alert(profile, None, event)
+                return
+
+        # ── Standard path: ChromaDB similarity scoring for DPI packets ─────────
         profile_text = profile.to_text()
         cached = await is_embed_cached(self.redis, profile_text, "threat_signatures")
-
         if cached:
-            # Text unchanged — reuse last anomaly score, no ChromaDB query
             return
 
-        # ── Score anomaly via ChromaDB ────────────────────────────────────────
         anomaly_score, matched_threat = await self._score_anomaly(profile, profile_text)
         profile.anomaly_score = anomaly_score
-
-        # Mark as cached so next identical profile text skips re-query
         await mark_embed_cached(self.redis, profile_text, "threat_signatures")
 
         if anomaly_score > rlm_cfg.anomaly_threshold:
@@ -359,37 +380,150 @@ class RLMEngine:
         )
         return similarity, matched
 
+    # ── MITRE technique → alert type (for ChromaDB-matched alerts) ──────────────
+    # When no suspicion_reason matches but ChromaDB scores a hit, we derive the
+    # alert type from the matched MITRE technique instead of emitting "RLM_ANOMALY".
+    _MITRE_TO_ALERT_TYPE = {
+        "T1071.001": "C2_BEACON_DETECTED",
+        "T1071.004": "DNS_TUNNELING_DETECTED",
+        "T1046":     "PORT_SCAN_DETECTED",
+        "T1048":     "DATA_EXFILTRATION_DETECTED",
+        "T1048.003": "DATA_EXFILTRATION_DETECTED",
+        "T1021.001": "LATERAL_MOVEMENT_DETECTED",
+        "T1021.002": "LATERAL_MOVEMENT_DETECTED",
+        "T1110.001": "BRUTE_FORCE_DETECTED",
+        "T1110.003": "CREDENTIAL_SPRAY_DETECTED",
+        "T1027":     "HIGH_ENTROPY_PAYLOAD_DETECTED",
+        "T1190":     "EXPLOIT_ATTEMPT_DETECTED",
+        "T1059.004": "REVERSE_SHELL_DETECTED",
+        "T1572":     "PROTOCOL_TUNNELING_DETECTED",
+        "T1090.003": "MESH_C2_RELAY_DETECTED",
+        "T1564.004": "COVERT_CHANNEL_DETECTED",
+        "T1205":     "SYNTHETIC_TRAFFIC_DETECTED",
+        "T1552.001": "CREDENTIAL_EXPOSURE_DETECTED",
+        "T1001":     "PROTOCOL_ANOMALY_DETECTED",
+        "T1595":     "RECONNAISSANCE_DETECTED",
+        "T1568.002": "DGA_MALWARE_DETECTED",
+    }
+
+    # ── Reason → alert type + severity + MITRE ATT&CK mapping ──────────────────
+    _REASON_TYPE_MAP = {
+        "C2_BEACON_TIMING":          ("C2_BEACON_DETECTED",              "CRITICAL", "T1071.001"),
+        "POLYMORPHIC_BEACON":        ("POLYMORPHIC_BEACON_DETECTED",     "HIGH",     "T1071.001"),
+        "ARITHMETIC_INTERVAL":       ("POLYMORPHIC_BEACON_DETECTED",     "HIGH",     "T1071.001"),
+        "PORT_SCAN":                 ("PORT_SCAN_DETECTED",              "MEDIUM",   "T1046"),
+        "SYN_ONLY":                  ("PORT_SCAN_DETECTED",              "MEDIUM",   "T1046"),
+        "HIGH_ENTROPY_PAYLOAD":      ("HIGH_ENTROPY_PAYLOAD_DETECTED",   "HIGH",     "T1027"),
+        "PACKED_OR_ENCRYPTED":       ("HIGH_ENTROPY_PAYLOAD_DETECTED",   "HIGH",     "T1027"),
+        "LARGE_OUTBOUND_TRANSFER":   ("DATA_EXFILTRATION_DETECTED",      "HIGH",     "T1048.003"),
+        "EXFIL_DEST":                ("DATA_EXFILTRATION_DETECTED",      "HIGH",     "T1048.003"),
+        "MICRO_PACKET_EXFILTRATION": ("SLOW_DRIP_EXFILTRATION_DETECTED", "HIGH",     "T1048.003"),
+        "SLOW_DRIP":                 ("SLOW_DRIP_EXFILTRATION_DETECTED", "HIGH",     "T1048.003"),
+        "DNS_TUNNELING":             ("DNS_TUNNELING_DETECTED",          "HIGH",     "T1071.004"),
+        "LONG_SUBDOMAIN":            ("DNS_TUNNELING_DETECTED",          "HIGH",     "T1071.004"),
+        "SSH_BRUTE_FORCE":           ("BRUTE_FORCE_DETECTED",            "HIGH",     "T1110.001"),
+        "RAPID_AUTH_ATTEMPTS":       ("BRUTE_FORCE_DETECTED",            "HIGH",     "T1110.001"),
+        "CREDENTIAL_SPRAY":          ("CREDENTIAL_SPRAY_DETECTED",       "HIGH",     "T1110.003"),
+        "LOW_AND_SLOW_AUTH":         ("CREDENTIAL_SPRAY_DETECTED",       "HIGH",     "T1110.003"),
+        "LATERAL_MOVEMENT":          ("LATERAL_MOVEMENT_DETECTED",       "HIGH",     "T1021.002"),
+        "ADMIN_PROTOCOL":            ("LATERAL_MOVEMENT_DETECTED",       "HIGH",     "T1021.002"),
+        "UNUSUAL_INTERNAL_RDP":      ("LATERAL_MOVEMENT_DETECTED",       "HIGH",     "T1021.001"),
+        "EXPLOIT_PAYLOAD":           ("EXPLOIT_ATTEMPT_DETECTED",        "CRITICAL", "T1190"),
+        "WEB_EXPLOIT":               ("EXPLOIT_ATTEMPT_DETECTED",        "CRITICAL", "T1190"),
+        "SUSPICIOUS_PORT":           ("REVERSE_SHELL_DETECTED",          "CRITICAL", "T1059.004"),
+        "INTERACTIVE_SHELL":         ("REVERSE_SHELL_DETECTED",          "CRITICAL", "T1059.004"),
+        "BIDIRECTIONAL_SMALL":       ("REVERSE_SHELL_DETECTED",          "CRITICAL", "T1059.004"),
+        "OVERSIZED_ICMP":            ("PROTOCOL_TUNNELING_DETECTED",     "HIGH",     "T1572"),
+        "OVERSIZED_UDP":             ("PROTOCOL_TUNNELING_DETECTED",     "HIGH",     "T1572"),
+        "TUNNEL_PATTERN":            ("PROTOCOL_TUNNELING_DETECTED",     "HIGH",     "T1572"),
+        "MESH_C2_RELAY":             ("MESH_C2_RELAY_DETECTED",          "CRITICAL", "T1090.003"),
+        "INTERNAL_RELAY_CHAIN":      ("MESH_C2_RELAY_DETECTED",          "CRITICAL", "T1090.003"),
+        "COVERT_STORAGE_CHANNEL":    ("COVERT_CHANNEL_DETECTED",         "HIGH",     "T1564.004"),
+        "HEADER_FIELD_ENCODING":     ("COVERT_CHANNEL_DETECTED",         "HIGH",     "T1564.004"),
+        "SYNTHETIC_TRAFFIC":         ("SYNTHETIC_TRAFFIC_DETECTED",      "MEDIUM",   "T1205"),
+        "ZERO_JITTER_INTERVAL":      ("SYNTHETIC_TRAFFIC_DETECTED",      "MEDIUM",   "T1205"),
+        "UNKNOWN_THREAT_TYPE":       ("ANOMALOUS_BEHAVIOR_DETECTED",     "HIGH",     ""),
+        # ── DPI sensor reason keywords ──────────────────────────────────────────
+        # DPI emits these with appended values e.g. "SUSPICIOUS_PORT:4444"
+        # The substring match (key in reason_upper) handles the suffix correctly.
+        "SUSPICIOUS_PORT":           ("REVERSE_SHELL_DETECTED",          "CRITICAL", "T1059.004"),
+        "POTENTIAL_DGA":             ("DNS_TUNNELING_DETECTED",          "HIGH",     "T1071.004"),
+        "CLEARTEXT_CREDENTIALS":     ("CREDENTIAL_EXPOSURE_DETECTED",   "HIGH",     "T1552.001"),
+        "SUSPICIOUS_UA":             ("SUSPICIOUS_USERAGENT_DETECTED",  "MEDIUM",   "T1071.001"),
+        "ANOMALOUS_TTL":             ("PROTOCOL_ANOMALY_DETECTED",      "MEDIUM",   "T1001"),
+    }
+
+    def _classify_from_reasons(self, reasons: list) -> tuple:
+        """Derive (alert_type, severity, mitre) from packet suspicion_reasons."""
+        for reason in reasons:
+            r_upper = reason.upper()
+            for key, vals in self._REASON_TYPE_MAP.items():
+                if key in r_upper:
+                    atype, sev, mitre = vals[0], vals[1], vals[2]
+                    return atype, sev, mitre
+        return None, None, None  # Fallback to ChromaDB match
+
     async def _emit_ml_alert(
         self,
         profile: BehaviorProfile,
         threat: Optional[Dict],
         raw_event: Dict,
     ):
-        severity = "MEDIUM"
-        mitre    = ""
+        # Try to classify from packet suspicion_reasons first (most accurate)
+        reasons = raw_event.get("suspicion_reasons", [])
+        reason_type, reason_sev, reason_mitre = self._classify_from_reasons(reasons)
+
+        # Fall back to ChromaDB matched threat metadata
+        chroma_severity = "MEDIUM"
+        chroma_mitre    = ""
         if threat and threat.get("metadata"):
-            severity = threat["metadata"].get("severity", "MEDIUM")
-            mitre    = threat["metadata"].get("mitre", "")
+            chroma_severity = threat["metadata"].get("severity", "MEDIUM")
+            chroma_mitre    = threat["metadata"].get("mitre", "")
+
+        # Use reason-based classification if available; else derive from ChromaDB MITRE
+        if reason_type:
+            alert_type = reason_type
+            severity   = reason_sev
+            mitre      = reason_mitre or ""
+        else:
+            # ChromaDB path — map matched MITRE technique to a meaningful alert type
+            alert_type = self._MITRE_TO_ALERT_TYPE.get(chroma_mitre, "RLM_ANOMALY")
+            severity   = chroma_severity
+            mitre      = chroma_mitre
+
+        # Unknown/anomalous alert types get no MITRE — leave blank for AI to classify
+        if alert_type == "ANOMALOUS_BEHAVIOR_DETECTED":
+            mitre = ""
 
         alert = {
-            "type":              "RLM_ANOMALY",
+            "type":              alert_type,
             "severity":          severity,
             "timestamp":         datetime.utcnow().isoformat(),
             "entity_id":         profile.entity_id,
             "entity_type":       profile.entity_type,
             "anomaly_score":     round(profile.anomaly_score, 4),
-            "matched_mitre":     mitre,
+            "mitre_technique":   mitre,
+            "matched_mitre":     chroma_mitre,
             "threat_description": threat.get("document", "") if threat else "",
             "profile_summary":   profile.to_text()[:500],
             "src_ip":            raw_event.get("src_ip"),
             "dst_ip":            raw_event.get("dst_ip"),
+            "src_port":          raw_event.get("src_port"),
+            "dst_port":          raw_event.get("dst_port"),
+            "protocol":          raw_event.get("protocol"),
+            "entropy":           raw_event.get("entropy"),
+            "payload_size":      raw_event.get("payload_size"),
+            "suspicion_reasons": reasons,
             "observation_count": profile.observation_count,
+            "avg_bytes_per_min": round(profile.avg_bytes_per_min, 2),
+            "avg_entropy":       round(profile.avg_entropy, 4),
+            "source":            raw_event.get("source", "dpi"),
         }
 
         await self.producer.send(kafka_cfg.topics["threat_alerts"], value=alert)
         logger.warning(
-            f"🤖 RLM ANOMALY [{severity}] {profile.entity_id} "
-            f"score={profile.anomaly_score:.3f} MITRE={mitre}"
+            f"🤖 {alert_type} [{severity}] {profile.entity_id} "
+            f"score={profile.anomaly_score:.3f} MITRE={mitre or 'UNKNOWN'}"
         )
 
         # Upsert profile into ChromaDB for future baseline comparison

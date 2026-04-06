@@ -75,13 +75,13 @@ See `docs/PIPELINES.md` for the complete comparison of what each mode populates.
 
 | Topic | Retention | Producer | Consumers |
 |-------|-----------|----------|-----------|
-| `raw-packets` | 1 hour | dpi-sensor | rlm-engine |
-| `threat-alerts` | 24 hours | dpi-sensor, rlm-engine, **traffic-simulator** | mcp-orchestrator, n8n-bridge |
+| `raw-packets` | 1 hour | dpi-sensor, **traffic-simulator** | rlm-engine |
+| `threat-alerts` | 24 hours | dpi-sensor, rlm-engine | mcp-orchestrator, n8n-bridge |
 | `enriched-alerts` | 24 hours | rlm-engine | mcp-orchestrator, n8n-bridge |
 | `incidents` | 7 days | mcp-orchestrator | n8n-bridge |
 | `cti-updates` | 48 hours | threat-intel-scraper | rlm-engine, n8n-bridge |
 
-**Note:** `traffic-simulator` writes to `threat-alerts` directly — it never writes to `raw-packets`. This is why simulator-generated events don't populate behavioral profiles.
+**Note (v1.2):** `traffic-simulator` now writes to `raw-packets` — the same topic as the DPI sensor. Both pipelines feed the RLM engine and build real behavioral profiles. This is a change from v1.1 where the simulator wrote directly to `threat-alerts`.
 
 ### 3.3 Inter-Service Data Flow
 
@@ -91,17 +91,16 @@ Network Interface
     ▼ raw IP packets
 DPI Sensor (Scapy)
     │ PacketEvent dataclass → JSON
-    ├──► Kafka: raw-packets
-    └──► Kafka: threat-alerts  (if is_suspicious=True)
+    └──► Kafka: raw-packets
 
-Traffic Simulator [PARALLEL — skips DPI entirely]
-    │ Python dicts → JSON
-    └──► Kafka: threat-alerts  (synthetic events)
+Traffic Simulator (v1.2 — full pipeline)
+    │ Burst of 30–150 PacketEvent dicts → JSON
+    └──► Kafka: raw-packets  (SAME topic as DPI sensor)
 
-         │ (both DPI alerts and simulator events merge here)
+         │ (DPI and simulator both feed raw-packets)
          ▼
 RLM Engine
-    │ consumes raw-packets ONLY (not threat-alerts)
+    │ consumes raw-packets (from both DPI and simulator)
     │ updates BehaviorProfile (EMA)
     │ queries ChromaDB (cosine similarity)
     │ if score > threshold:
@@ -182,7 +181,7 @@ Max length: 100 timestamps
 
 **Purpose:** Generate synthetic threat events for testing the AI investigation and SOAR pipeline without real network traffic or Npcap.
 
-**Kafka target:** `threat-alerts` directly — **never writes to `raw-packets`**
+**Kafka target (v1.2):** `raw-packets` — publishes bursts of PacketEvent dicts, same as the real DPI sensor. Goes through the full RLM profiling pipeline before reaching `threat-alerts`.
 
 **IP pools:**
 ```python
@@ -219,6 +218,12 @@ SCENARIOS = [
     (scenario_high_entropy_payload,   weight=3),   # HIGH
     (scenario_protocol_tunneling,     weight=2),   # HIGH
     (scenario_credential_spray,       weight=3),   # HIGH
+    # 5 unknown novel threats (no MITRE mapping):
+    (scenario_polymorphic_beacon,     weight=2),   # HIGH — UNKNOWN
+    (scenario_covert_storage_channel, weight=1),   # HIGH — UNKNOWN
+    (scenario_slow_drip_exfil,        weight=2),   # HIGH — UNKNOWN
+    (scenario_mesh_c2_relay,          weight=2),   # CRITICAL — UNKNOWN
+    (scenario_synthetic_idle_traffic, weight=1),   # MEDIUM — UNKNOWN
 ]
 ```
 
@@ -252,7 +257,7 @@ new_value = (1 − α) × old_value + α × observation
 - `weekend_ratio` — EMA of is_weekend boolean
 - `observation_count` — +1 per packet
 
-**Zero-observation condition:** If a source IP only appears in simulator-generated `threat-alerts` events and never in real `raw-packets`, its `observation_count` stays 0 and all metrics stay 0. This is expected behavior.
+**v1.2 note:** Simulator events now feed `raw-packets`, so all simulated IPs will have non-zero behavioral profiles. The `observation_count` reflects the burst size (30–150 packets per scenario).
 
 **to_text() output (natural language profile for embedding):**
 ```

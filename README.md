@@ -83,27 +83,32 @@ Real Network Traffic
 ### Mode 2 — Traffic Simulator (testing & demo)
 ```
 traffic_simulator.py
-    │ Python dicts (no actual packets)
-    ▼ Kafka: "threat-alerts"            ← bypasses raw-packets entirely
+    │ Bursts of 30–150 raw PacketEvent dicts per scenario
+    ▼ Kafka: "raw-packets"              ← SAME topic as real DPI (v1.2+)
+    │
+    ▼ rlm_engine._consume_packets()     ← EMA profiling, ChromaDB scoring
+    ▼ Kafka: "threat-alerts"            ← only if anomaly detected
     │
     ▼ mcp_orchestrator → LLM → incident created
 ```
 
-**What the simulator skips:**
+> **v1.2 change:** The simulator was upgraded to publish raw `PacketEvent` dicts to `raw-packets` (full pipeline). It no longer bypasses RLM. Both pipelines are now identical from the Kafka layer onwards.
 
-| Data | Real DPI | Simulator |
-|------|----------|-----------|
+**What each pipeline populates:**
+
+| Data | Real DPI | Simulator (v1.2) |
+|------|----------|-----------------|
 | `alerts` table | Yes | Yes |
 | `incidents` table | Yes | Yes |
-| `packets` table | Yes (every packet) | No |
-| `behavior_profiles.observation_count` | Yes | No (stays 0) |
-| `behavior_profiles.avg_bytes_per_min` | Yes | No (stays 0) |
-| `behavior_profiles.avg_entropy` | Yes | No (stays 0) |
-| `behavior_profiles.anomaly_score` | Yes (ChromaDB computed) | No (stays 0) |
-| `packets_per_minute` TimescaleDB view | Yes | No |
-| ChromaDB `behavior_profiles` collection | Yes | No |
+| `packets` table | Yes (every packet) | Yes (scenario burst) |
+| `behavior_profiles.observation_count` | Yes (real) | Yes (burst count) |
+| `behavior_profiles.avg_bytes_per_min` | Yes (real EMA) | Yes (scenario values) |
+| `behavior_profiles.avg_entropy` | Yes (real EMA) | Yes (scenario values) |
+| `behavior_profiles.anomaly_score` | Yes (ChromaDB) | Yes (ChromaDB) |
+| `packets_per_minute` TimescaleDB view | Yes | Yes |
+| ChromaDB `behavior_profiles` collection | Yes | Yes |
 
-The simulator is an **alert factory** — it tests the AI investigation and response pipeline. The RLM engine is a **packet analysis engine** — it needs real bytes to do its job. This is by design: both pipelines are complete and correct; they serve different testing scenarios.
+Both pipelines are complete. The real DPI pipeline captures genuine packets from your network interface; the simulator generates realistic packet bursts for controlled testing without Npcap.
 
 ---
 
@@ -199,12 +204,19 @@ The React dashboard at `http://localhost:5173` has six tabs:
 | OVERVIEW | Risk gauge, 6 metric cards, 24h alert timeline, platform health radar |
 | ALERTS | Full alert table with severity badges, anomaly score bars, MITRE tags |
 | INCIDENTS | Incident registry — OPEN / INVESTIGATING / RESOLVED / CLOSED lifecycle |
-| RESPONSE | **Human-in-the-loop block recommendations panel** — analyst approves or dismisses |
+| RESPONSE | Human-in-the-loop: Block Recommendations + Active Incidents + Firewall Rules |
 | THREAT INTEL | ChromaDB semantic search + MITRE coverage map + CTI source status |
 | HOSTS | RLM behavioral profile lookup — anomaly score, entropy, block status, recent alerts |
 
-### Block Recommendations (Human-in-the-Loop)
-The RESPONSE tab shows all pending block recommendations flagged by the AI investigation. Every CRITICAL incident and any incident where the AI verdict indicates `block_recommended=true` appears here. The analyst clicks **BLOCK IP** to execute (Redis + PostgreSQL) or **DISMISS** to close without action. The incident is marked RESOLVED after either action. This replaces the previous auto-block approach and follows the SOAR human-in-the-loop pattern.
+### RESPONSE Tab (Human-in-the-Loop)
+
+The RESPONSE tab has three panels:
+
+**Block Recommendations** — AI-flagged IPs awaiting analyst decision. Every CRITICAL/HIGH incident with `block_recommended=True` appears here. Analyst clicks **BLOCK IP** (inserts `firewall_rules` row + Redis `blocked:{ip}`) or **DISMISS** (marks incident RESOLVED without action).
+
+**Active Incidents** — All `status='OPEN'` incidents as clickable cards. Expand any incident to see the AI investigation summary, Technical Playbook, and Threat Signature matches.
+
+**Firewall Rules** — Currently blocked IPs from the `firewall_rules` table. Each row has an **UNBLOCK** button that calls `DELETE /api/v1/firewall-rules?ip={ip}` and removes the Redis key.
 
 ---
 
@@ -277,6 +289,28 @@ LLM_PROVIDER=openai
 
 ---
 
+## Live DPI — Real Packet Capture on Windows
+
+To capture **real network traffic** from your Windows machine, use the included launcher:
+
+```
+Double-click: Start Live DPI.bat
+```
+
+The launcher automatically:
+1. Elevates to Administrator (required for Npcap)
+2. Installs Npcap 1.80 silently if not present
+3. Installs Python packages (`scapy`, `aiokafka`, `redis`)
+4. Starts Docker Desktop if not running
+5. Starts the full Docker compose stack
+6. Launches `src/dpi/sensor.py` pointing at `localhost:9092` (Kafka)
+
+**Npcap** is the Windows packet capture driver. Without it, Scapy cannot read raw packets. The launcher handles the install automatically. For manual setup see [`docs/LIVE_DPI_SETUP.md`](docs/LIVE_DPI_SETUP.md).
+
+> **Important:** The DPI sensor runs **on the host machine** (not in Docker) so it can access the physical network interface. All other services run in Docker.
+
+---
+
 ## MITRE ATT&CK Coverage
 
 | Technique | ID | Detection Layer |
@@ -339,6 +373,7 @@ pip install pytest && pytest tests/unit/ -v
 | [`docs/TRD.md`](docs/TRD.md) | Technical Requirements Document |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Deep-dive system design |
 | [`docs/PIPELINES.md`](docs/PIPELINES.md) | DPI vs Simulator pipeline comparison |
+| [`docs/LIVE_DPI_SETUP.md`](docs/LIVE_DPI_SETUP.md) | Npcap + Start Live DPI.bat setup guide |
 | [`docs/RAG_DESIGN.md`](docs/RAG_DESIGN.md) | RAG pipeline design + governance |
 | [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | All REST API endpoints |
 | [`docs/WORKFLOWS.md`](docs/WORKFLOWS.md) | n8n SOAR workflow specs |
@@ -355,7 +390,7 @@ pip install pytest && pytest tests/unit/ -v
 - **5** SOAR workflows (n8n)
 - **15** MITRE ATT&CK techniques covered
 - **5** live CTI sources (NVD, CISA, Abuse.ch, MITRE, OTX)
-- **12** simulated threat scenarios across MITRE kill-chain
+- **17** simulated threat scenarios (12 MITRE-mapped + 5 unknown novel threats)
 - **11+** enterprise integrations
 - **3** LLM providers (Claude, GPT-4o, Gemini) — switchable via single env var
 - **1** LLM API call per investigation (~553 tokens, ~$0.000165)
@@ -364,4 +399,4 @@ pip install pytest && pytest tests/unit/ -v
 
 ---
 
-*CyberSentinel AI v1.0 — Academic Capstone Project 2025/2026*
+*CyberSentinel AI v1.2 — Academic Capstone Project 2025/2026*

@@ -91,6 +91,7 @@ class AlertResponse(BaseModel):
     mitre_technique:       Optional[str]
     anomaly_score:         Optional[float]
     investigation_summary: Optional[str]
+    source:                Optional[str] = "dpi"
 
 
 class IncidentResponse(BaseModel):
@@ -106,6 +107,7 @@ class IncidentResponse(BaseModel):
     investigation_summary: Optional[str] = None
     block_recommended:     Optional[bool] = False
     block_target_ip:       Optional[str]  = None
+    source:                Optional[str]  = "dpi"
 
 
 class BlockRecommendationResponse(BaseModel):
@@ -223,61 +225,65 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
 # ── DASHBOARD ─────────────────────────────────────────────────────────────────
 @app.get("/api/v1/dashboard", response_model=DashboardStats)
-async def get_dashboard(user: dict = Depends(get_current_user)):
+async def get_dashboard(
+    source: Optional[str] = Query(None, description="Filter by data source: simulator or dpi"),
+    user:   dict          = Depends(get_current_user),
+):
     """Real-time SOC dashboard statistics from TimescaleDB."""
+    src_filter = f"AND COALESCE(source, 'dpi') = '{source.lower()}'" if source else ""
     async with db_pool.acquire() as conn:
-        counts = await conn.fetchrow("""
+        counts = await conn.fetchrow(f"""
             SELECT
                 COUNT(*)                                                          AS total_24h,
                 COUNT(*) FILTER (WHERE severity = 'CRITICAL')                    AS critical_24h,
                 COUNT(*) FILTER (WHERE severity = 'HIGH')                        AS high_24h
             FROM alerts
-            WHERE timestamp > NOW() - INTERVAL '24 hours'
+            WHERE timestamp > NOW() - INTERVAL '24 hours' {src_filter}
         """)
 
         active_incidents = await conn.fetchval(
-            "SELECT COUNT(*) FROM incidents WHERE status IN ('OPEN','INVESTIGATING')"
+            f"SELECT COUNT(*) FROM incidents WHERE status IN ('OPEN','INVESTIGATING') {src_filter.replace('alerts', 'incidents') if source else ''}"
         ) or 0
 
         packets_analyzed = await conn.fetchval(
-            "SELECT COUNT(*) FROM alerts WHERE timestamp > NOW() - INTERVAL '24 hours'"
+            f"SELECT COUNT(*) FROM alerts WHERE timestamp > NOW() - INTERVAL '24 hours' {src_filter}"
         ) or 0
 
         unique_ips = await conn.fetchval(
-            "SELECT COUNT(DISTINCT src_ip) FROM alerts WHERE timestamp > NOW() - INTERVAL '24 hours'"
+            f"SELECT COUNT(DISTINCT src_ip) FROM alerts WHERE timestamp > NOW() - INTERVAL '24 hours' {src_filter}"
         ) or 0
 
         blocked_ips = await conn.fetchval(
             "SELECT COUNT(*) FROM firewall_rules WHERE action = 'BLOCK' AND (expires_at IS NULL OR expires_at > NOW())"
         ) or 0
 
-        top_src_ips = await conn.fetch("""
+        top_src_ips = await conn.fetch(f"""
             SELECT host(src_ip) AS src_ip, COUNT(*) AS alert_count, MAX(severity) AS max_severity
             FROM alerts
-            WHERE timestamp > NOW() - INTERVAL '24 hours' AND src_ip IS NOT NULL
+            WHERE timestamp > NOW() - INTERVAL '24 hours' AND src_ip IS NOT NULL {src_filter}
             GROUP BY src_ip ORDER BY alert_count DESC LIMIT 10
         """)
 
-        top_mitre = await conn.fetch("""
+        top_mitre = await conn.fetch(f"""
             SELECT mitre_technique, COUNT(*) AS count
             FROM alerts
             WHERE timestamp > NOW() - INTERVAL '24 hours'
-              AND mitre_technique IS NOT NULL AND mitre_technique != ''
+              AND mitre_technique IS NOT NULL AND mitre_technique != '' {src_filter}
             GROUP BY mitre_technique ORDER BY count DESC LIMIT 10
         """)
 
-        top_types = await conn.fetch("""
+        top_types = await conn.fetch(f"""
             SELECT type, COUNT(*) AS count
             FROM alerts
-            WHERE timestamp > NOW() - INTERVAL '24 hours'
+            WHERE timestamp > NOW() - INTERVAL '24 hours' {src_filter}
             GROUP BY type ORDER BY count DESC LIMIT 5
         """)
 
-        alerts_by_hour = await conn.fetch("""
+        alerts_by_hour = await conn.fetch(f"""
             SELECT DATE_TRUNC('hour', timestamp) AS hour,
                    COUNT(*) AS count, severity
             FROM alerts
-            WHERE timestamp > NOW() - INTERVAL '24 hours'
+            WHERE timestamp > NOW() - INTERVAL '24 hours' {src_filter}
             GROUP BY hour, severity ORDER BY hour
         """)
 
@@ -309,6 +315,7 @@ async def get_alerts(
     severity:   Optional[str] = Query(None, description="Filter by severity level"),
     src_ip:     Optional[str] = Query(None, description="Filter by source IP"),
     alert_type: Optional[str] = Query(None, description="Filter by alert type"),
+    source:     Optional[str] = Query(None, description="Filter by data source: simulator or dpi"),
     hours:      int           = Query(24,  ge=1, le=8760),
     limit:      int           = Query(100, ge=1, le=1000),
     offset:     int           = Query(0,   ge=0),
@@ -327,6 +334,9 @@ async def get_alerts(
     if alert_type:
         params.append(alert_type)
         conditions.append(f"type = ${len(params)}")
+    if source:
+        params.append(source.lower())
+        conditions.append(f"COALESCE(source, 'dpi') = ${len(params)}")
 
     where = " AND ".join(conditions)
     params += [limit, offset]
@@ -334,7 +344,8 @@ async def get_alerts(
     query = f"""
         SELECT id::text, type, severity, timestamp,
                host(src_ip) AS src_ip, host(dst_ip) AS dst_ip,
-               description, mitre_technique, anomaly_score, investigation_summary
+               description, mitre_technique, anomaly_score, investigation_summary,
+               COALESCE(source, 'dpi') AS source
         FROM alerts
         WHERE {where}
         ORDER BY timestamp DESC
@@ -369,6 +380,7 @@ async def semantic_threat_search(
 async def get_incidents(
     status_filter: Optional[str] = Query(None, alias="status"),
     severity:      Optional[str] = Query(None),
+    source:        Optional[str] = Query(None, description="Filter by data source: simulator or dpi"),
     limit:         int           = Query(50, ge=1, le=500),
     user:          dict          = Depends(get_current_user),
 ):
@@ -381,6 +393,9 @@ async def get_incidents(
     if severity:
         params.append(severity.upper())
         conditions.append(f"severity = ${len(params)}")
+    if source:
+        params.append(source.lower())
+        conditions.append(f"COALESCE(source, 'dpi') = ${len(params)}")
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
@@ -388,7 +403,8 @@ async def get_incidents(
     query = f"""
         SELECT incident_id, title, severity, status, description,
                affected_ips, mitre_techniques, created_at, updated_at,
-               investigation_summary, block_recommended, block_target_ip
+               investigation_summary, block_recommended, block_target_ip,
+               COALESCE(source, 'dpi') AS source
         FROM incidents
         {where}
         ORDER BY
@@ -518,18 +534,26 @@ async def update_incident_status(
 
 
 @app.get("/api/v1/block-recommendations", response_model=List[BlockRecommendationResponse])
-async def get_block_recommendations(user: dict = Depends(get_current_user)):
+async def get_block_recommendations(
+    source: Optional[str] = Query(None, description="Filter by source: simulator or dpi"),
+    user:   dict           = Depends(get_current_user),
+):
     """Return pending block recommendations — incidents flagged by AI awaiting analyst approval."""
+    src_clause = ""
+    params: list = []
+    if source:
+        params.append(source.lower())
+        src_clause = f"AND COALESCE(source, 'dpi') = $1"
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch("""
+        rows = await conn.fetch(f"""
             SELECT incident_id, title, severity, block_target_ip,
                    investigation_summary, mitre_techniques, created_at
             FROM incidents
-            WHERE block_recommended = TRUE AND status = 'OPEN'
+            WHERE block_recommended = TRUE AND status = 'OPEN' {src_clause}
             ORDER BY
                 CASE severity WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2 ELSE 3 END,
                 created_at DESC
-        """)
+        """, *params)
     return [BlockRecommendationResponse(**dict(r)) for r in rows]
 
 
@@ -689,29 +713,118 @@ async def get_host_intelligence(
 
 
 # ── INVESTIGATIONS CONTROL ────────────────────────────────────────────────────
-INVESTIGATIONS_PAUSE_KEY = "investigations:paused"
+VALID_SOURCES = {"simulator", "dpi"}
 
 
 class ControlRequest(BaseModel):
     investigations_paused: bool
 
 
+def _pause_key(source: Optional[str]) -> str:
+    src = (source or "").lower()
+    return f"investigations:paused:{src}" if src in VALID_SOURCES else f"investigations:paused:{src}"
+
+
 @app.get("/api/v1/control")
-async def get_control(user: dict = Depends(get_current_user)):
-    """Return current on/off state of AI investigations."""
-    paused = bool(await redis_client.get(INVESTIGATIONS_PAUSE_KEY))
-    return {"investigations_paused": paused}
+async def get_control(
+    source: Optional[str] = Query(None, description="simulator or dpi"),
+    user:   dict          = Depends(get_current_user),
+):
+    """Return paused state for a specific source (simulator or dpi)."""
+    key = _pause_key(source or "dpi")
+    paused = bool(await redis_client.get(key))
+    return {"investigations_paused": paused, "source": source or "dpi"}
 
 
 @app.post("/api/v1/control")
-async def set_control(req: ControlRequest, user: dict = Depends(get_current_user)):
-    """Pause or resume AI investigations (controls OpenAI token spend)."""
+async def set_control(
+    req:    ControlRequest,
+    source: Optional[str] = Query(None, description="simulator or dpi"),
+    user:   dict          = Depends(get_current_user),
+):
+    """Pause or resume AI investigations for a specific source."""
+    key = _pause_key(source or "dpi")
     if req.investigations_paused:
-        await redis_client.set(INVESTIGATIONS_PAUSE_KEY, "1")
+        await redis_client.set(key, "1")
     else:
-        await redis_client.delete(INVESTIGATIONS_PAUSE_KEY)
+        await redis_client.delete(key)
     state = "PAUSED" if req.investigations_paused else "RESUMED"
-    return {"investigations_paused": req.investigations_paused, "state": state}
+    return {"investigations_paused": req.investigations_paused, "source": source or "dpi", "state": state}
+
+
+# ── FIREWALL RULES ───────────────────────────────────────────────────────────
+@app.get("/api/v1/firewall-rules")
+async def list_firewall_rules(
+    status_filter: Optional[str] = Query(None, alias="status", description="active | expired | all (default: all)"),
+    user: dict = Depends(get_current_user),
+):
+    """Return all firewall rules with live active/expired status."""
+    now = datetime.utcnow()
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id::text, ip_address::text, action, justification,
+                   incident_id, created_by, created_at, duration_hours, expires_at
+            FROM firewall_rules
+            ORDER BY created_at DESC
+            LIMIT 500
+        """)
+
+    rules = []
+    for r in rows:
+        is_active = r["expires_at"] is None or r["expires_at"].replace(tzinfo=None) > now
+        entry = {
+            "id":            r["id"],
+            "ip_address":    r["ip_address"],
+            "action":        r["action"],
+            "justification": r["justification"],
+            "incident_id":   r["incident_id"],
+            "created_by":    r["created_by"],
+            "created_at":    r["created_at"].isoformat(),
+            "duration_hours":r["duration_hours"],
+            "expires_at":    r["expires_at"].isoformat() if r["expires_at"] else None,
+            "is_active":     is_active,
+        }
+        if status_filter == "active" and not is_active:
+            continue
+        if status_filter == "expired" and is_active:
+            continue
+        rules.append(entry)
+
+    return rules
+
+
+@app.delete("/api/v1/firewall-rules")
+async def unblock_ip(
+    ip: str = Query(..., description="IP address to unblock (without CIDR suffix)"),
+    user: dict = Depends(get_current_user),
+):
+    """Analyst manually unblocks an IP — removes Redis key and expires all active rules for that IP."""
+    if user.get("role") == "viewer":
+        raise HTTPException(status_code=403, detail="Viewers cannot unblock IPs")
+
+    # Strip any CIDR suffix that may have been passed
+    clean_ip = ip.split("/")[0].strip()
+
+    # Remove Redis block key (try both bare IP and /32 form)
+    await redis_client.delete(f"blocked:{clean_ip}")
+    await redis_client.delete(f"blocked:{clean_ip}/32")
+
+    # Expire all active rules where host(ip_address) matches the bare IP
+    async with db_pool.acquire() as conn:
+        updated = await conn.execute("""
+            UPDATE firewall_rules
+            SET expires_at = NOW(), duration_hours = 0
+            WHERE host(ip_address::inet) = $1
+              AND (expires_at IS NULL OR expires_at > NOW())
+        """, clean_ip)
+
+    rows_updated = int(updated.split()[-1]) if updated else 0
+    return {
+        "ip_address":    clean_ip,
+        "unblocked":     True,
+        "rules_expired": rows_updated,
+        "message":       f"IP {clean_ip} unblocked. {rows_updated} active rule(s) expired.",
+    }
 
 
 # ── HEALTH ────────────────────────────────────────────────────────────────────

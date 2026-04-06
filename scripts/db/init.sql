@@ -102,7 +102,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     session_id             TEXT,
     investigation_summary  TEXT,
     investigated_at        TIMESTAMPTZ,
-    raw_event              JSONB       DEFAULT '{}'
+    raw_event              JSONB       DEFAULT '{}',
+    source                 VARCHAR(20) DEFAULT 'dpi'
 );
 
 CREATE INDEX IF NOT EXISTS idx_alerts_timestamp    ON alerts (timestamp DESC);
@@ -132,7 +133,8 @@ CREATE TABLE IF NOT EXISTS incidents (
     resolved_at          TIMESTAMPTZ,
     investigation_summary TEXT,
     block_recommended    BOOLEAN      DEFAULT FALSE,
-    block_target_ip      TEXT
+    block_target_ip      TEXT,
+    source               VARCHAR(20)  DEFAULT 'dpi'
 );
 
 CREATE INDEX IF NOT EXISTS idx_incidents_status   ON incidents (status, created_at DESC);

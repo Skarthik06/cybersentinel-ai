@@ -114,7 +114,7 @@ Real-time SOC dashboard statistics from TimescaleDB and Redis.
 - `risk_score` is computed as `min(1.0, (critical*10 + high*3) / max(total*5, 1))` — range 0.0–1.0
 - `active_incidents` counts OPEN and INVESTIGATING only
 - `blocked_ips` counts active (non-expired) firewall rules
-- `packets_analyzed` is 0 when running with traffic simulator only (no real DPI)
+- `packets_analyzed` reflects packets in the TimescaleDB hypertable (real DPI + simulator bursts in v1.2)
 
 ---
 
@@ -419,7 +419,163 @@ Full behavioral profile and alert history for a specific IP.
 | `profile.profile_text` | `BehaviorProfile.to_text()` | null if no real DPI data |
 | `recent_alerts` | PostgreSQL `alerts` | Last 20 alerts sorted newest first |
 
-**Important:** `profile` is `null` if the host has never been seen by the RLM engine. Profile metrics are all 0 if the host only appears in simulator-generated events (not real packet capture). See `docs/PIPELINES.md` for a full explanation.
+**Important:** `profile` is `null` if the host has never been seen by the RLM engine. With v1.2+ the simulator feeds the full RLM pipeline, so profile metrics are populated for simulator IPs too. Only purely external IPs with no packet history will have zero profiles.
+
+---
+
+### POST `/api/v1/incidents/{incident_id}/remediation`
+
+Generate an AI Technical Playbook for an incident on demand.
+
+**Auth:** Bearer token (any role)
+
+**Path Parameter:** `incident_id`
+
+**Response:**
+```json
+{
+  "incident_id": "INC-20260406074415",
+  "playbook": "## TECHNICAL PLAYBOOK\n\n**CONTAINMENT (now)**\n```\niptables -I INPUT -s 185.220.101.47 -j DROP\n```\n\n**ERADICATION (next 2h)**\n..."
+}
+```
+
+The playbook contains actual shell/CLI commands using the real IPs and ports from the incident, Snort/Sigma detection rules tuned to the specific IOC, and verification checklist items. Cost: ~1 LLM call per request (~$0.0002 with GPT-4o mini).
+
+---
+
+### GET `/api/v1/firewall-rules`
+
+List all firewall rules (blocked IPs) with active/expired status.
+
+**Auth:** Bearer token (any role)
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `status` | string | all | Filter: `active`, `expired`, `all` |
+
+**Response:**
+```json
+[
+  {
+    "id": "550e8400-...",
+    "ip_address": "185.220.101.47",
+    "action": "BLOCK",
+    "justification": "Analyst approved: C2 beacon confirmed",
+    "incident_id": "INC-20260406074415",
+    "created_by": "admin",
+    "created_at": "2026-04-06T08:00:00.000Z",
+    "duration_hours": 24,
+    "expires_at": "2026-04-07T08:00:00.000Z",
+    "is_active": true
+  }
+]
+```
+
+**Ordering:** Newest first. Up to 500 records.
+
+---
+
+### DELETE `/api/v1/firewall-rules`
+
+Analyst manually unblocks an IP. Removes the Redis key and expires all active rules for that IP in PostgreSQL.
+
+**Auth:** Bearer token (role: analyst, responder, or admin — not viewer)
+
+**Query Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `ip` | string | Yes | IP address to unblock (CIDR suffix stripped automatically) |
+
+**Example:**
+```http
+DELETE /api/v1/firewall-rules?ip=185.220.101.47
+Authorization: Bearer {token}
+```
+
+> **Note:** CIDR notation is accepted — `185.220.101.47/32` works identically to `185.220.101.47`. The endpoint strips the suffix and matches using `host(ip_address::inet) = $1`.
+
+**What this does:**
+1. Deletes Redis keys `blocked:{ip}` and `blocked:{ip}/32`
+2. Sets `expires_at = NOW()` on all active `firewall_rules` rows for this IP
+
+**Response:**
+```json
+{
+  "ip_address": "185.220.101.47",
+  "unblocked": true,
+  "rules_expired": 1,
+  "message": "IP 185.220.101.47 unblocked. 1 active rule(s) expired."
+}
+```
+
+---
+
+### GET `/api/v1/control`
+
+Check whether AI investigation is paused for a source.
+
+**Auth:** Bearer token (any role)
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `source` | string | `dpi` | `simulator` or `dpi` |
+
+**Response:**
+```json
+{
+  "investigations_paused": false,
+  "source": "simulator"
+}
+```
+
+---
+
+### POST `/api/v1/control`
+
+Pause or resume AI investigation for a specific source.
+
+**Auth:** Bearer token (any role)
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `source` | string | `dpi` | `simulator` or `dpi` — which pipeline to control |
+
+**Request Body:**
+```json
+{
+  "investigations_paused": true
+}
+```
+
+**Response:**
+```json
+{
+  "investigations_paused": true,
+  "source": "simulator",
+  "state": "PAUSED"
+}
+```
+
+**When paused:** Incoming HIGH/CRITICAL alerts from that source still create basic OPEN incidents via `_create_pending_incident()` with `block_recommended=True` for CRITICAL/HIGH severity. No LLM call is made.
+
+---
+
+### GET `/api/v1/incidents/{incident_id}/detail`
+
+Full detail for a single incident including investigation summary, evidence, and linked metadata.
+
+**Auth:** Bearer token (any role)
+
+**Path Parameter:** `incident_id`
+
+**Response:** Full `IncidentDetailResponse` schema with all fields including `investigation_summary`, `evidence`, `block_recommended`, `block_target_ip`, and `source`.
 
 ---
 
@@ -572,4 +728,30 @@ curl -s -X POST http://localhost:8080/api/v1/threat-search \
 
 ---
 
-*API Reference — CyberSentinel AI v1.0 — 2025/2026*
+## Full Endpoint Summary
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/auth/token` | None | Get JWT token |
+| GET | `/health` | None | Platform health check |
+| GET | `/api/v1/dashboard` | Any | SOC statistics |
+| GET | `/api/v1/alerts` | Any | Paginated alert list |
+| POST | `/api/v1/threat-search` | Any | ChromaDB semantic search |
+| GET | `/api/v1/incidents` | Any | Incident list |
+| GET | `/api/v1/incidents/{id}/detail` | Any | Single incident full detail |
+| PATCH | `/api/v1/incidents/{id}` | analyst+ | Update incident |
+| PATCH | `/api/v1/incidents/{id}/status` | analyst+ | Update status only |
+| GET | `/api/v1/block-recommendations` | Any | Pending block recommendations |
+| POST | `/api/v1/incidents/{id}/block` | responder+ | Approve block |
+| POST | `/api/v1/incidents/{id}/dismiss` | analyst+ | Dismiss recommendation |
+| POST | `/api/v1/incidents/{id}/remediation` | Any | Generate AI playbook |
+| GET | `/api/v1/hosts/{ip}` | Any | Host behavioral profile |
+| GET | `/api/v1/firewall-rules` | Any | List blocked IPs |
+| DELETE | `/api/v1/firewall-rules?ip={ip}` | analyst+ | Unblock an IP |
+| GET | `/api/v1/control?source=` | Any | Check investigation pause state |
+| POST | `/api/v1/control?source=` | Any | Pause / resume investigations |
+| GET | `/metrics` | None | Prometheus metrics |
+
+---
+
+*API Reference — CyberSentinel AI v1.2 — 2025/2026*

@@ -37,7 +37,7 @@ DPI-1 validates the multi-signal ensemble detection strategy (entropy + ports + 
 **How these papers support CyberSentinel AI:**
 RLM-1 validates the EMA formula (`new = (1-α)*old + α*obs`) applied to network anomaly detection — the exact formula in `BehaviorProfile.update()`. RLM-2 is the benchmark dataset (275,000 IPs, 40 weeks) for evaluating the RLM engine. RLM-3 validates online unsupervised learning without labelled data — justifying zero-label RLM operation.
 
-**Pipeline note:** These papers support the DPI pipeline only. When running the traffic simulator, `behavior_profiles` in ChromaDB remain empty for simulator IPs because the RLM engine is not invoked — the simulator writes directly to the `threat-alerts` Kafka topic, bypassing the RLM stage entirely.
+**Pipeline note (v1.2):** From v1.2, the traffic simulator feeds `raw-packets` and goes through the full RLM pipeline. These papers support both pipelines — the simulator now exercises the same EMA profiling and ChromaDB scoring as real DPI.
 
 ---
 

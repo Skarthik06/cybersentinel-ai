@@ -39,7 +39,7 @@ The platform deploys as 14 Docker containers with a single command.
 │  LAYER 1 — INGESTION                                            │
 │  DPI Sensor (Scapy) ──────────────────────────┐                 │
 │  Playwright CTI Scraper (NVD/CISA/MITRE/OTX) ─┼──► Kafka Bus   │
-│  Traffic Simulator (12 synthetic scenarios) ───┘                │
+│  Traffic Simulator (17 scenarios → raw-packets) ───┘              │
 ├─────────────────────────────────────────────────────────────────┤
 │  LAYER 2 — INTELLIGENCE                                         │
 │  RLM Engine ──► EMA Profiles ──► ChromaDB (cosine similarity)  │
@@ -71,11 +71,12 @@ Populates: ALL tables including `behavior_profiles` with real metrics.
 
 ### Pipeline 2 — Traffic Simulator (Testing & Demo)
 ```
-Python dicts → threat-alerts (Kafka) → MCP Orchestrator
+Burst of 30–150 PacketEvents → raw-packets (Kafka) → RLM Engine
+                              → threat-alerts (Kafka) → MCP Orchestrator
 ```
-Populates: `alerts` and `incidents` only. **Does NOT populate `behavior_profiles`.**
+Populates: **ALL tables** — same as Pipeline 1. v1.2 upgraded the simulator to publish raw `PacketEvent` bursts to `raw-packets`, passing through the full RLM profiling pipeline. Behavioral profiles, anomaly scores, and ChromaDB entries are built for simulated IPs.
 
-This means Hosts tab behavioral metrics (anomaly score, avg bytes, entropy, observations) will show **0 when running the simulator only** — this is expected and correct. Real packet capture is required to build behavioral profiles. See `docs/PIPELINES.md` for the complete explanation.
+The only difference from real DPI: no actual network interface is read (no Npcap required). See `docs/PIPELINES.md` for the complete explanation and `docs/LIVE_DPI_SETUP.md` for how to enable real packet capture.
 
 ---
 
@@ -104,9 +105,9 @@ cybersentinel-ai/
 │   │   ├── sources.py            # CTI source definitions
 │   │   └── threat_intel_scraper.py  # NVD/CISA/Abuse.ch/MITRE/OTX
 │   ├── simulation/               # Traffic simulator (test/demo)
-│   │   └── traffic_simulator.py  # 12 threat scenarios → threat-alerts
+│   │   └── traffic_simulator.py  # 17 scenarios → raw-packets (full DPI pipeline)
 │   └── api/                      # FastAPI REST gateway
-│       ├── gateway.py            # 11 endpoints including block recommendations
+│       ├── gateway.py            # 19 endpoints including block recommendations, firewall, control
 │       ├── auth.py               # JWT + RBAC
 │       └── schemas.py            # Pydantic models
 │
@@ -174,7 +175,7 @@ cd frontend && npm install && npm run dev
 | OVERVIEW | Risk gauge (0–100%), 6 KPI cards, 24h alert timeline, platform health |
 | ALERTS | Table: severity badges, anomaly score bars, MITRE tags, investigation summaries |
 | INCIDENTS | Lifecycle: OPEN → INVESTIGATING → RESOLVED → CLOSED; drawer with full detail |
-| RESPONSE | Human-in-the-loop: pending block recommendations, BLOCK IP / DISMISS buttons |
+| RESPONSE | Human-in-the-loop: Block Recommendations + Active Incidents + Firewall Rules (UNBLOCK) |
 | THREAT INTEL | ChromaDB semantic search; MITRE ATT&CK coverage map; CTI source status |
 | HOSTS | IP lookup: behavioral profile (real DPI only), block status, incidents, alerts |
 
@@ -189,6 +190,7 @@ cd frontend && npm install && npm run dev
 | [`TRD.md`](TRD.md) | Technical Requirements Document |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Deep-dive system design + token optimization |
 | [`PIPELINES.md`](PIPELINES.md) | **DPI vs Simulator pipeline comparison (read this)** |
+| [`LIVE_DPI_SETUP.md`](LIVE_DPI_SETUP.md) | Npcap installation + Start Live DPI.bat guide |
 | [`RAG_DESIGN.md`](RAG_DESIGN.md) | RAG pipeline design + governance |
 | [`API_REFERENCE.md`](API_REFERENCE.md) | All REST API endpoints including block recommendations |
 | [`WORKFLOWS.md`](WORKFLOWS.md) | n8n SOAR workflow specs |
@@ -204,7 +206,7 @@ cd frontend && npm install && npm run dev
 - **6** SOC Dashboard tabs
 - **5** SOAR workflows (n8n)
 - **15** MITRE ATT&CK techniques covered
-- **12** simulated threat scenarios
+- **17** simulated threat scenarios (12 MITRE-mapped + 5 unknown novel threats)
 - **5** live CTI sources (NVD, CISA, Abuse.ch, MITRE, OTX)
 - **11+** enterprise integrations (Slack, Teams, PagerDuty, Jira, ServiceNow, Email, Telegram, AbuseIPDB)
 - **3** LLM providers (Claude, GPT-4o, Gemini) — switchable via single env var
@@ -221,7 +223,7 @@ cd frontend && npm install && npm run dev
 
 This project makes **three novel contributions** to the academic literature:
 
-1. **RLM Behavioral Engine** — Online, unsupervised host profiling via Exponential Moving Average updated recursively per network packet, converted to NLP text, and scored via cosine similarity against threat signature vectors. No training data, no labels, zero-day capable. Only populated by real DPI — not affected by simulation.
+1. **RLM Behavioral Engine** — Online, unsupervised host profiling via Exponential Moving Average updated recursively per network packet, converted to NLP text, and scored via cosine similarity against threat signature vectors. No training data, no labels, zero-day capable. Populated by both real DPI and the simulator (v1.2+).
 
 2. **Optimized 1-Call LLM SOC Investigation** — AI agents investigate security alerts with a single LLM API call by pre-gathering all evidence in parallel (`asyncio.gather`), compressing it (`_summarize_result`), and sending one structured prompt. 90% token reduction vs traditional agentic loops.
 
@@ -229,4 +231,4 @@ This project makes **three novel contributions** to the academic literature:
 
 ---
 
-*CyberSentinel AI — Capstone Project 2025/2026 — Built with Claude AI*
+*CyberSentinel AI v1.2 — Capstone Project 2025/2026*

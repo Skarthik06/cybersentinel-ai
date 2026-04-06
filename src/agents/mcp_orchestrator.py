@@ -139,6 +139,7 @@ class MCPToolExecutor:
         limit = min(int(args.get("limit", 5)), 5)   # cap at 5 rows — enough context
         severity = args.get("severity")
         src_ip = args.get("src_ip")
+        source = args.get("source")  # scope context to same pipeline (simulator vs dpi)
 
         query = """
             SELECT type, severity, timestamp, src_ip, dst_ip, description, mitre_technique
@@ -146,6 +147,9 @@ class MCPToolExecutor:
             WHERE timestamp > NOW() - ($1 * INTERVAL '1 hour')
         """
         params = [hours]
+        if source:
+            query += f" AND COALESCE(source, 'dpi') = ${len(params)+1}"
+            params.append(source)
         if severity:
             query += f" AND severity = ${len(params)+1}"
             params.append(severity)
@@ -320,12 +324,13 @@ class MCPToolExecutor:
                 INSERT INTO incidents
                     (incident_id, title, severity, description, affected_ips,
                      mitre_techniques, evidence, investigation_summary,
-                     block_recommended, block_target_ip, status, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'OPEN', NOW())
+                     block_recommended, block_target_ip, status, source, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'OPEN', $11, NOW())
             """, incident_id, args["title"], args["severity"], description,
                 affected_ips, mitre_techniques,
                 evidence, investigation_summary,
-                block_recommended, block_target_ip)
+                block_recommended, block_target_ip,
+                args.get("source", "dpi"))
         logger.info(f"📋 Incident created: {incident_id} [{args['severity']}] {args['title']}")
         return f"✅ Incident created: {incident_id} — {args['title']}"
 
@@ -426,6 +431,8 @@ class InvestigateAgent:
 
         logger.info(f"🕵️ Investigating alert: {alert_type} from {src_ip}")
 
+        source = alert.get("source", "dpi")
+
         # ── Step 1: Gather intel in parallel (zero LLM calls) ─────────────
         threat_raw, host_raw, rep_raw, recent_raw = await asyncio.gather(
             self.executor.execute("query_threat_database", {
@@ -434,7 +441,9 @@ class InvestigateAgent:
             }),
             self.executor.execute("get_host_profile",     {"ip_address": src_ip}),
             self.executor.execute("lookup_ip_reputation", {"ip_address": dst_ip or src_ip}),
-            self.executor.execute("get_recent_alerts",    {"hours": 6, "limit": 5, "src_ip": src_ip}),
+            # Scope recent alerts to same pipeline — no cross-contamination between
+            # simulator and live DPI investigations
+            self.executor.execute("get_recent_alerts",    {"hours": 6, "limit": 5, "src_ip": src_ip, "source": source}),
         )
 
         # ── Step 2: Compress each result to essential facts only ───────────
@@ -502,6 +511,7 @@ class InvestigateAgent:
             "mitre_techniques":  verdict.get("mitre_techniques", [alert.get("mitre_technique", "")]),
             "block_recommended": block_recommended,
             "block_target_ip":   block_target_ip,
+            "source":            source,  # already extracted above — simulator or dpi
         })
 
         # Parse the generated incident ID for logging
@@ -604,6 +614,13 @@ class MCPOrchestrator:
         self.executor = MCPToolExecutor(self.chroma_client, self.db_pool, self.redis)
         self.investigate_agent = InvestigateAgent(self.executor)
 
+        # Default DPI investigations to paused on first run so simulator and live
+        # investigations are always independent — user must explicitly enable each.
+        # Only sets the key if it doesn't already exist (preserves user preference).
+        if not await self.redis.exists("investigations:paused:dpi"):
+            await self.redis.set("investigations:paused:dpi", "1")
+            logger.info("🔒 DPI investigations defaulted to paused — enable via dashboard Live mode toggle")
+
         logger.info("✅ All agents initialized — starting orchestration")
 
         await asyncio.gather(
@@ -641,10 +658,14 @@ class MCPOrchestrator:
                 # LOW: log only
                 src_ip = alert.get("src_ip", "unknown")
                 now = _time.time()
-                if priority == 0:  # CRITICAL
-                    if not self.alert_queue.full():
-                        await self.alert_queue.put((priority, alert))
-                        logger.info(f"📥 Queued CRITICAL alert from {src_ip}")
+                if priority == 0:  # CRITICAL — once per IP per 5 min (same as HIGH)
+                    if now - self._high_last_seen.get(f"crit:{src_ip}", 0) > 300:
+                        self._high_last_seen[f"crit:{src_ip}"] = now
+                        if not self.alert_queue.full():
+                            await self.alert_queue.put((priority, alert))
+                            logger.info(f"📥 Queued CRITICAL alert from {src_ip}")
+                        else:
+                            await self._log_alert(alert)
                     else:
                         await self._log_alert(alert)
                 elif priority == 1:  # HIGH — once per IP per 5 min
@@ -688,10 +709,13 @@ class MCPOrchestrator:
                 logger.info(f"⏳ Rate-limit wait {wait_sec:.0f}s before next investigation")
                 await asyncio.sleep(wait_sec)
 
-            # Check if investigations are paused (controlled via dashboard toggle)
-            if await self.redis.exists("investigations:paused"):
-                logger.info("⏸️  Investigations paused — alert logged without AI analysis")
+            # Check if investigations are paused per source (simulator vs dpi)
+            source = alert.get("source", "dpi")
+            pause_key = f"investigations:paused:{source}"
+            if await self.redis.exists(pause_key):
+                logger.info(f"⏸️  Investigations paused [{source}] — creating pending incident")
                 await self._log_alert(alert)
+                await self._create_pending_incident(alert)
                 continue
 
             self._last_investigation_at = _time.time()
@@ -710,8 +734,8 @@ class MCPOrchestrator:
                 await conn.execute("""
                     INSERT INTO alerts
                         (type, severity, timestamp, src_ip, dst_ip, description,
-                         mitre_technique, anomaly_score, investigation_summary, raw_event)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                         mitre_technique, anomaly_score, investigation_summary, raw_event, source)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 """,
                     alert.get("type", "UNKNOWN"),
                     alert.get("severity", "LOW"),
@@ -723,9 +747,63 @@ class MCPOrchestrator:
                     alert.get("anomaly_score"),
                     investigation.get("analysis", "") if investigation else "",
                     json.dumps(alert),
+                    alert.get("source", "dpi"),
                 )
         except Exception as e:
             logger.error(f"Alert log failed: {e}")
+
+    async def _create_pending_incident(self, alert: Dict):
+        """Create a basic PENDING incident when AI investigation is paused.
+        Ensures alerts always surface in the Incidents panel, even without AI analysis."""
+        try:
+            incident_id = f"INC-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+            src_ip  = alert.get("src_ip") or "unknown"
+            dst_ip  = alert.get("dst_ip") or ""
+            sev     = alert.get("severity", "MEDIUM")
+            mitre   = alert.get("mitre_technique", "")
+            desc    = alert.get("description") or alert.get("threat_description", "")
+            score   = alert.get("anomaly_score")
+            source  = alert.get("source", "dpi")
+            title   = f"{alert.get('type','Alert')} — {src_ip}"
+            summary = (
+                f"⏸ AI investigation was paused when this alert arrived.\n\n"
+                f"Host: {src_ip}"
+                f"{f' → {dst_ip}' if dst_ip else ''}\n"
+                f"Severity: {sev}"
+                f"{f' | MITRE: {mitre}' if mitre else ''}"
+                f"{f' | Score: {score:.2f}' if score is not None else ''}\n\n"
+                f"Description: {desc}\n\n"
+                f"Enable AI Investigation to trigger a full analysis on this host."
+            )
+            block_rec = sev in ('CRITICAL', 'HIGH')
+            block_target = src_ip if block_rec else ''
+            async with self.db_pool.acquire() as conn:
+                # Avoid duplicate incidents for the same IP within a 2-minute window
+                existing = await conn.fetchval("""
+                    SELECT incident_id FROM incidents
+                    WHERE $1 = ANY(affected_ips)
+                      AND source = $2
+                      AND created_at > NOW() - INTERVAL '2 minutes'
+                    LIMIT 1
+                """, src_ip, source)
+                if existing:
+                    logger.info(f"⏭  Skipping duplicate pending incident for {src_ip} (recent: {existing})")
+                    return
+                await conn.execute("""
+                    INSERT INTO incidents
+                        (incident_id, title, severity, description, affected_ips,
+                         mitre_techniques, evidence, investigation_summary,
+                         block_recommended, block_target_ip, status, source, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'OPEN', $11, NOW())
+                """,
+                    incident_id, title, sev, desc,
+                    [src_ip], [mitre] if mitre else [],
+                    f"anomaly_score={score}" if score is not None else "",
+                    summary, block_rec, block_target, source,
+                )
+            logger.info(f"📋 Pending incident created: {incident_id} [{sev}] {title}")
+        except Exception as e:
+            logger.error(f"Pending incident creation failed: {e}")
 
 
 async def main():

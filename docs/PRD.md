@@ -140,11 +140,11 @@ SOC teams burn out at high rates due to repetitive triage work. The problem is n
 
 **F-003: Traffic Simulator**
 - Generate synthetic threat events for testing without real network traffic
-- 12 threat scenarios across full MITRE ATT&CK kill-chain
-- Publish directly to `threat-alerts` Kafka topic (bypasses DPI and RLM)
+- 17 threat scenarios: 12 MITRE-mapped + 5 unknown novel threats (AI must classify)
+- Publish raw PacketEvent bursts (30–150 packets) to `raw-packets` Kafka topic — full DPI pipeline (v1.2)
 - Configurable rate via `SIMULATION_RATE` env var (default: 2/minute)
-- Use realistic IP pools and hardcoded anomaly scores
-- Enables testing of AI investigation and SOAR pipeline without Npcap
+- Each burst clears the RLM min_observations gate; builds real behavioral profiles
+- Enables testing of full platform including RLM profiling without Npcap
 
 **F-004: Threat Intelligence Ingestion**
 - Harvest CVEs from NIST NVD every 4 hours (CVSS ≥ 7.0)
