@@ -312,6 +312,10 @@ export default function SOCDashboard() {
   const [firewallRules, setFirewallRules] = useState([]);
   const [firewallFilter, setFirewallFilter] = useState("all"); // all | active | expired
   const [unblockAction, setUnblockAction] = useState({});
+  const [n8nUrl, setN8nUrl] = useState(() => localStorage.getItem("cs_n8n_url") || "http://localhost:5678");
+  const [wfStatus, setWfStatus] = useState({}); // { wfId: "idle"|"running"|"done"|"error" }
+  const [pendingReports, setPendingReports] = useState([]);
+  const [reportAction, setReportAction] = useState({}); // { reportId: "approving"|"denying"|"done"|"error" }
   const waterCanvasRef = useRef(null);
 
   // Water mosaic animation (login screen only)
@@ -430,6 +434,15 @@ export default function SOCDashboard() {
 
   useEffect(() => { if (authed) { fetchBlockRecs(); const t = setInterval(()=>fetchBlockRecs(), 30000); return ()=>clearInterval(t); } }, [authed, fetchBlockRecs]);
   useEffect(() => { if (authed) { fetchFirewallRules(); const t = setInterval(()=>fetchFirewallRules(), 30000); return ()=>clearInterval(t); } }, [authed, fetchFirewallRules]);
+
+  const fetchPendingReports = useCallback(async () => {
+    if (!token) return;
+    try {
+      const r = await fetch(`${API}/api/v1/reports/pending?status=PENDING`, { headers: { Authorization: `Bearer ${token}` } });
+      if (r.ok) setPendingReports(await r.json());
+    } catch {}
+  }, [token]);
+  useEffect(() => { if (authed) { fetchPendingReports(); const t = setInterval(fetchPendingReports, 20000); return ()=>clearInterval(t); } }, [authed, fetchPendingReports]);
 
   async function login() {
     setLoading(true); setLoginError("");
@@ -851,7 +864,7 @@ export default function SOCDashboard() {
           <span style={{ fontFamily:"'Rajdhani',sans-serif", fontSize:17, fontWeight:700, letterSpacing:2, color:"#E2E8F0" }}>CYBERSENTINEL</span>
           <span style={{ fontFamily:"monospace", fontSize:9, color:ACCENT_LITE, background:`${ACCENT_LITE}18`, padding:"2px 8px", borderRadius:3, letterSpacing:2 }}>{MODE_ICON} {MODE_LABEL}</span>
           <div style={{ display:"flex", gap:1, marginLeft:8 }}>
-            {[["overview","◉ OVERVIEW"],["alerts","⚡ ALERTS"],["incidents","🚨 INCIDENTS"],["response","🛡️ RESPONSE"],["intel","🔍 THREAT INTEL"],["hosts","💻 HOSTS"],["threatfeed","📡 THREAT FEED"]].map(([k,l]) => (
+            {[["overview","◉ OVERVIEW"],["alerts","⚡ ALERTS"],["incidents","🚨 INCIDENTS"],["response","🛡️ RESPONSE"],["intel","🔍 THREAT INTEL"],["hosts","💻 HOSTS"],["threatfeed","📡 THREAT FEED"],["automation","⚙ AUTOMATION"]].map(([k,l]) => (
               <button key={k} onClick={()=>setTab(k)} style={{
                 padding:"6px 14px", border:"none", background: tab===k?`${ACCENT}22`:"transparent",
                 color: tab===k?ACCENT_LITE:"#546E7A", fontFamily:"'Share Tech Mono',monospace", fontSize:10,
@@ -865,6 +878,9 @@ export default function SOCDashboard() {
                 )}
                 {k==="threatfeed" && (data.alerts||[]).length > 0 && (
                   <span style={{ marginLeft:6, background:ACCENT, color:"#fff", fontSize:9, fontWeight:700, padding:"1px 5px", borderRadius:8, verticalAlign:"middle" }}>{(data.alerts||[]).length}</span>
+                )}
+                {k==="automation" && pendingReports.length > 0 && (
+                  <span style={{ marginLeft:6, background:"#E53935", color:"#fff", fontSize:9, fontWeight:700, padding:"1px 5px", borderRadius:8, verticalAlign:"middle" }}>{pendingReports.length}</span>
                 )}
               </button>
             ))}
@@ -2437,6 +2453,297 @@ export default function SOCDashboard() {
           )}
         </div>
       )}
+
+        {/* ── AUTOMATION TAB ── */}
+        {tab==="automation" && (() => {
+          const N8N = n8nUrl.replace(/\/$/, "");
+
+          const WORKFLOWS = [
+            {
+              id: "soar",
+              name: "Critical Alert SOAR",
+              file: "01_critical_alert_soar.json",
+              trigger: "Event-driven",
+              schedule: "Fires on every CRITICAL/HIGH alert",
+              desc: "Enriches alerts via AbuseIPDB + host intel, auto-blocks confirmed threats, posts to Slack.",
+              manual: false,
+              color: "#E53935",
+              icon: "🚨",
+            },
+            {
+              id: "daily",
+              name: "Daily SOC Report",
+              file: "02_daily_soc_report.json",
+              trigger: "Schedule",
+              schedule: "7AM Mon–Fri",
+              desc: "Fetches 24h metrics, generates AI analyst report, posts 5-section summary to Slack.",
+              manual: true,
+              webhook: `${N8N}/webhook/run-daily-report`,
+              color: "#4FC3F7",
+              icon: "📊",
+            },
+            {
+              id: "cve",
+              name: "CVE Intel Pipeline",
+              file: "03_cve_intel_pipeline.json",
+              trigger: "Event-driven",
+              schedule: "Fires on incoming CVE webhook",
+              desc: "Receives CVE data, runs AI risk analysis, posts severity-rated alert to Slack.",
+              manual: false,
+              color: "#FF6D00",
+              icon: "🔍",
+            },
+            {
+              id: "sla",
+              name: "SLA Watchdog",
+              file: "04_sla_watchdog.json",
+              trigger: "Schedule",
+              schedule: "Every 15 minutes",
+              desc: "Checks open incidents against SLA thresholds (CRITICAL=30m, HIGH=2h), alerts on breach.",
+              manual: true,
+              webhook: `${N8N}/webhook/run-sla-check`,
+              color: "#FFD740",
+              icon: "⏱",
+            },
+            {
+              id: "board",
+              name: "Weekly Board Report",
+              file: "05_weekly_board_report.json",
+              trigger: "Schedule",
+              schedule: "Monday 8AM",
+              desc: "Aggregates weekly metrics, generates AI executive report with 5 sections, posts to Slack.",
+              manual: true,
+              webhook: `${N8N}/webhook/run-board-report`,
+              color: "#00E676",
+              icon: "📋",
+            },
+          ];
+
+          async function triggerWorkflow(wf) {
+            setWfStatus(s => ({ ...s, [wf.id]: "running" }));
+            try {
+              const r = await fetch(`${API}/api/v1/workflows/trigger/${wf.id}`, {
+                method: "POST",
+                headers: { Authorization: `Bearer ${token}` },
+              });
+              if (r.ok) {
+                localStorage.setItem(`cs_wf_last_${wf.id}`, new Date().toISOString());
+                setWfStatus(s => ({ ...s, [wf.id]: "done" }));
+                setTimeout(() => setWfStatus(s => ({ ...s, [wf.id]: "idle" })), 4000);
+              } else {
+                const err = await r.json().catch(() => ({}));
+                setWfStatus(s => ({ ...s, [wf.id]: "error", [`${wf.id}_msg`]: err.detail || "Failed" }));
+                setTimeout(() => setWfStatus(s => ({ ...s, [wf.id]: "idle" })), 5000);
+              }
+            } catch {
+              setWfStatus(s => ({ ...s, [wf.id]: "error" }));
+              setTimeout(() => setWfStatus(s => ({ ...s, [wf.id]: "idle" })), 5000);
+            }
+          }
+
+          return (
+            <div className="tab-content" style={{ padding:"20px 24px", display:"flex", flexDirection:"column", gap:20 }}>
+              {/* Header + n8n URL config */}
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:12 }}>
+                <div>
+                  <div style={{ fontFamily:"'Rajdhani',sans-serif", fontSize:18, fontWeight:700, color:"#E2E8F0", letterSpacing:2 }}>AUTOMATION WORKFLOWS</div>
+                  <div style={{ fontFamily:"monospace", fontSize:10, color:"#546E7A", marginTop:2 }}>5 n8n workflows · Slack Bot API · Multi-provider LLM</div>
+                </div>
+                <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                  <span style={{ fontFamily:"monospace", fontSize:10, color:"#546E7A" }}>n8n URL:</span>
+                  <input
+                    value={n8nUrl}
+                    onChange={e => { setN8nUrl(e.target.value); localStorage.setItem("cs_n8n_url", e.target.value); }}
+                    style={{ fontFamily:"monospace", fontSize:11, background:"rgba(8,18,30,0.8)", border:"1px solid rgba(79,195,247,0.2)", borderRadius:4, padding:"4px 10px", color:"#90CAF9", width:220, outline:"none" }}
+                    placeholder="http://localhost:5678"
+                  />
+                </div>
+              </div>
+
+              {/* Workflow cards grid */}
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(380px,1fr))", gap:16 }}>
+                {WORKFLOWS.map(wf => {
+                  const st = wfStatus[wf.id] || "idle";
+                  const lastRun = localStorage.getItem(`cs_wf_last_${wf.id}`);
+                  const btnColor = st === "done" ? "#00E676" : st === "error" ? "#E53935" : st === "running" ? "#FFD740" : wf.color;
+                  const errMsg = wfStatus[`${wf.id}_msg`];
+                  const btnLabel = st === "running" ? "RUNNING..." : st === "done" ? "✓ TRIGGERED" : st === "error" ? `✗ ${errMsg || "FAILED"}` : "▶ RUN NOW";
+
+                  return (
+                    <div key={wf.id} className="dash-panel" style={{
+                      background:"rgba(7,16,27,0.85)", backdropFilter:"blur(12px)",
+                      border:`1px solid ${wf.color}22`, borderRadius:12, padding:0, overflow:"hidden",
+                      transition:"border-color 0.2s",
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.borderColor = `${wf.color}55`}
+                    onMouseLeave={e => e.currentTarget.style.borderColor = `${wf.color}22`}
+                    >
+                      {/* Card header */}
+                      <div style={{ padding:"14px 18px 12px", borderBottom:`1px solid ${wf.color}18`, display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:12 }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                          <span style={{ fontSize:22 }}>{wf.icon}</span>
+                          <div>
+                            <div style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:12, color:"#E2E8F0", letterSpacing:1 }}>{wf.name}</div>
+                            <div style={{ fontFamily:"monospace", fontSize:9, color:wf.color, marginTop:2, letterSpacing:1 }}>{wf.file}</div>
+                          </div>
+                        </div>
+                        <span style={{ fontFamily:"monospace", fontSize:9, color:wf.color, background:`${wf.color}18`, border:`1px solid ${wf.color}30`, borderRadius:4, padding:"2px 8px", whiteSpace:"nowrap" }}>
+                          {wf.trigger}
+                        </span>
+                      </div>
+
+                      {/* Card body */}
+                      <div style={{ padding:"12px 18px 16px", display:"flex", flexDirection:"column", gap:10 }}>
+                        <div style={{ fontFamily:"monospace", fontSize:10, color:"#90A4AE", lineHeight:1.7 }}>{wf.desc}</div>
+                        <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                          <span style={{ fontSize:9, color:"#38516A", fontFamily:"monospace", letterSpacing:1 }}>SCHEDULE:</span>
+                          <span style={{ fontFamily:"monospace", fontSize:9, color:"#546E7A" }}>{wf.schedule}</span>
+                        </div>
+                        {lastRun && (
+                          <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                            <span style={{ fontSize:9, color:"#38516A", fontFamily:"monospace", letterSpacing:1 }}>LAST RUN:</span>
+                            <span style={{ fontFamily:"monospace", fontSize:9, color:"#546E7A" }}>{ago(lastRun)}</span>
+                          </div>
+                        )}
+
+                        {/* Action row */}
+                        <div style={{ display:"flex", gap:8, marginTop:4 }}>
+                          {wf.manual ? (
+                            <button
+                              onClick={() => triggerWorkflow(wf)}
+                              disabled={st === "running"}
+                              style={{
+                                fontFamily:"'Share Tech Mono',monospace", fontSize:10, letterSpacing:1,
+                                padding:"6px 18px", borderRadius:4, cursor: st === "running" ? "not-allowed" : "pointer",
+                                background:`${btnColor}18`, border:`1px solid ${btnColor}50`, color:btnColor,
+                                transition:"all 0.2s", opacity: st === "running" ? 0.7 : 1,
+                              }}
+                              onMouseEnter={e => { if (st !== "running") e.currentTarget.style.background = `${btnColor}30`; }}
+                              onMouseLeave={e => { e.currentTarget.style.background = `${btnColor}18`; }}
+                            >{btnLabel}</button>
+                          ) : (
+                            <span style={{ fontFamily:"monospace", fontSize:9, color:"#38516A", padding:"6px 0", letterSpacing:1 }}>AUTO-TRIGGERED · NO MANUAL RUN</span>
+                          )}
+                          <span style={{ fontFamily:"monospace", fontSize:9, color:"#263238", alignSelf:"center", marginLeft:"auto" }}>
+                            {wf.manual ? `POST ${wf.webhook.replace(N8N, "")}` : ""}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* ── APPROVAL QUEUE ── */}
+              <div>
+                <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:12 }}>
+                  <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:10, color:"#4FC3F7", letterSpacing:2 }}>PENDING APPROVAL</span>
+                  {pendingReports.length > 0 && (
+                    <span style={{ background:"#E53935", color:"#fff", fontSize:9, fontWeight:700, padding:"2px 7px", borderRadius:8 }}>{pendingReports.length}</span>
+                  )}
+                  <span style={{ fontFamily:"monospace", fontSize:9, color:"#38516A", marginLeft:"auto" }}>auto-refreshes every 20s</span>
+                </div>
+
+                {pendingReports.length === 0 ? (
+                  <div style={{ padding:"24px", background:"rgba(7,16,27,0.6)", border:"1px solid rgba(79,195,247,0.07)", borderRadius:10, textAlign:"center", fontFamily:"monospace", fontSize:10, color:"#38516A" }}>
+                    No reports pending approval — all clear
+                  </div>
+                ) : (
+                  <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+                    {pendingReports.map(rep => {
+                      const WORKFLOW_META = {
+                        daily_soc:    { label:"Daily SOC Report",    color:"#4FC3F7", icon:"📊" },
+                        sla_watchdog: { label:"SLA Watchdog Alert",  color:"#FFD740", icon:"⏱" },
+                        board_report: { label:"Weekly Board Report", color:"#00E676", icon:"📋" },
+                      };
+                      const meta = WORKFLOW_META[rep.workflow] || { label: rep.workflow, color:"#90A4AE", icon:"📄" };
+                      const act = reportAction[rep.report_id] || "idle";
+
+                      async function handleAction(action) {
+                        setReportAction(s => ({ ...s, [rep.report_id]: action === "approve" ? "approving" : "denying" }));
+                        try {
+                          const r = await fetch(`${API}/api/v1/reports/${rep.report_id}/${action}`, {
+                            method: "POST", headers: { Authorization: `Bearer ${token}` }
+                          });
+                          if (r.ok) {
+                            setReportAction(s => ({ ...s, [rep.report_id]: "done" }));
+                            setTimeout(() => { fetchPendingReports(); setReportAction(s => { const n={...s}; delete n[rep.report_id]; return n; }); }, 1200);
+                          } else {
+                            setReportAction(s => ({ ...s, [rep.report_id]: "error" }));
+                            setTimeout(() => setReportAction(s => ({ ...s, [rep.report_id]: "idle" })), 3000);
+                          }
+                        } catch {
+                          setReportAction(s => ({ ...s, [rep.report_id]: "error" }));
+                          setTimeout(() => setReportAction(s => ({ ...s, [rep.report_id]: "idle" })), 3000);
+                        }
+                      }
+
+                      return (
+                        <div key={rep.report_id} className="dash-panel" style={{
+                          background:"rgba(7,16,27,0.85)", border:`1px solid ${meta.color}30`,
+                          borderRadius:10, overflow:"hidden",
+                          animation: act === "done" ? "none" : undefined,
+                          opacity: act === "done" ? 0.4 : 1, transition:"opacity 0.4s",
+                        }}>
+                          {/* Header row */}
+                          <div style={{ padding:"12px 18px", borderBottom:`1px solid ${meta.color}15`, display:"flex", alignItems:"center", gap:10, background:`${meta.color}08` }}>
+                            <span style={{ fontSize:18 }}>{meta.icon}</span>
+                            <div style={{ flex:1, minWidth:0 }}>
+                              <div style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:11, color:"#E2E8F0", letterSpacing:1, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{rep.title}</div>
+                              <div style={{ fontFamily:"monospace", fontSize:9, color:"#546E7A", marginTop:2 }}>
+                                <span style={{ color:meta.color }}>{meta.label}</span>
+                                {"  ·  "}received {ago(rep.created_at)}
+                                {"  ·  "}ID: <span style={{ color:"#38516A" }}>{rep.report_id}</span>
+                              </div>
+                            </div>
+                            {/* Pulsing pending dot */}
+                            {act === "idle" && <ThreatDot color={meta.color} size={6}/>}
+                          </div>
+
+                          {/* Action row */}
+                          <div style={{ padding:"10px 18px", display:"flex", alignItems:"center", gap:10 }}>
+                            <span style={{ fontFamily:"monospace", fontSize:9, color:"#546E7A", flex:1 }}>
+                              {act === "approving" ? "Sending to Slack..." : act === "denying" ? "Discarding..." : act === "done" ? "Done ✓" : act === "error" ? "Action failed — try again" : "Review and approve to send to Slack, or deny to discard."}
+                            </span>
+                            <button
+                              onClick={() => handleAction("approve")}
+                              disabled={act !== "idle"}
+                              style={{
+                                fontFamily:"'Share Tech Mono',monospace", fontSize:10, letterSpacing:1,
+                                padding:"6px 20px", borderRadius:4, cursor: act !== "idle" ? "not-allowed" : "pointer",
+                                background: act === "approving" ? "rgba(0,230,118,0.08)" : "rgba(0,230,118,0.12)",
+                                border:"1px solid rgba(0,230,118,0.4)", color:"#00E676",
+                                opacity: act !== "idle" ? 0.5 : 1, transition:"all 0.15s",
+                              }}
+                            >✓ APPROVE & SEND</button>
+                            <button
+                              onClick={() => handleAction("deny")}
+                              disabled={act !== "idle"}
+                              style={{
+                                fontFamily:"'Share Tech Mono',monospace", fontSize:10, letterSpacing:1,
+                                padding:"6px 16px", borderRadius:4, cursor: act !== "idle" ? "not-allowed" : "pointer",
+                                background:"rgba(229,57,53,0.08)", border:"1px solid rgba(229,57,53,0.3)", color:"#EF5350",
+                                opacity: act !== "idle" ? 0.5 : 1, transition:"all 0.15s",
+                              }}
+                            >✗ DENY</button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Info bar */}
+              <div style={{ padding:"12px 16px", background:"rgba(79,195,247,0.03)", border:"1px solid rgba(79,195,247,0.08)", borderRadius:8, fontFamily:"monospace", fontSize:10, color:"#38516A", lineHeight:1.8 }}>
+                <span style={{ color:"#4FC3F7" }}>HOW IT WORKS</span>
+                {"  ·  "}Scheduled workflows fire automatically. Manual workflows need n8n running at the URL above.
+                {"  ·  "}Results are posted to your <span style={{ color:"#4FC3F7" }}>SLACK_CHANNEL_ID</span>.
+                {"  ·  "}AI calls use <span style={{ color:"#4FC3F7" }}>{"{"}LLM_PROVIDER{"}"}</span> from your <span style={{ color:"#4FC3F7" }}>.env</span>.
+              </div>
+            </div>
+          );
+        })()}
 
       {/* STATUS BAR */}
       <div style={{

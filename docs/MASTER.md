@@ -1,6 +1,6 @@
 # CyberSentinel AI — Master Project Document
 
-**Version 1.1 | 2026 | Comprehensive Technical Reference with Visual Diagrams**
+**Version 1.2.1 | 2026 | Comprehensive Technical Reference with Visual Diagrams**
 
 > This document is the single source of truth for the entire CyberSentinel AI platform. Every diagram, table, and explanation is derived directly from the live source code. Mermaid diagrams render natively on GitHub, VS Code (Mermaid Preview extension), Notion, Obsidian, and GitBook.
 

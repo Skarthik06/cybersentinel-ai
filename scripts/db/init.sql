@@ -246,6 +246,23 @@ INSERT INTO users (username, email, password_hash, role) VALUES
 ON CONFLICT (username) DO NOTHING;
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- PENDING REPORTS (n8n approval queue)
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS pending_reports (
+    report_id    VARCHAR(40)  PRIMARY KEY,
+    workflow     VARCHAR(40)  NOT NULL,           -- daily_soc | sla_watchdog | board_report
+    title        TEXT         NOT NULL,
+    slack_payload JSONB       NOT NULL,           -- full Slack blocks payload, sent on approve
+    status       VARCHAR(20)  NOT NULL DEFAULT 'PENDING'
+                              CHECK (status IN ('PENDING','APPROVED','DENIED')),
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    actioned_at  TIMESTAMPTZ,
+    actioned_by  VARCHAR(80)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_reports_status ON pending_reports (status, created_at DESC);
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- AUDIT LOG
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS audit_log (

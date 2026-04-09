@@ -240,6 +240,9 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      N8N_URL: ${N8N_URL:-http://host.docker.internal:5678}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_CHANNEL_ID: ${SLACK_CHANNEL_ID:-}
     networks: [cybersentinel-net]
     depends_on: [postgres, redis, chromadb]
     restart: unless-stopped

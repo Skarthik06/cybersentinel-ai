@@ -42,34 +42,74 @@ def _detect_capture_interface() -> str:
     if sys.platform == "win32":
         # Windows with Npcap — interface names are \Device\NPF_{GUID}
         # conf.ifaces maps these to human-readable descriptions
-        # Descriptions to always skip — virtual, wireless, loopback
+        # Descriptions to always skip — virtual only (NOT wireless — user may be on Wi-Fi)
         skip_desc = ("loopback", "hyper-v", "wsl", "virtual", "docker",
-                     "vmware", "vpn", "vethernet", "miniport", "ndis",
-                     "wireless", "wi-fi", "wifi", "802.11", "wlan")
-        # Wired-only keywords — prioritised over generic brand names
+                     "vmware", "vpn", "vethernet", "miniport", "ndis")
+        # Wired-first keywords — preferred over Wi-Fi but Wi-Fi is a valid fallback
         wired_keywords = ("gbe", "gigabit", "pcie", "pci express",
                           "ethernet controller", "ethernet adapter",
                           "network adapter", "lan", "realtek pcie",
                           "intel ethernet", "broadcom netxtreme")
+        wifi_keywords  = ("wireless", "wi-fi", "wifi", "802.11", "wlan",
+                          "rtl8188", "rtl8192", "atheros", "intel wireless",
+                          "broadcom 802")
         try:
-            candidates_win = {}
+            import subprocess, re as _re
+            # Get active default gateway interface via route print
+            _route = subprocess.check_output("route print 0.0.0.0", shell=True,
+                                             stderr=subprocess.DEVNULL).decode(errors="ignore")
+            _gw_match = _re.search(r"0\.0\.0\.0\s+0\.0\.0\.0\s+\S+\s+(\S+)", _route)
+            active_ip = _gw_match.group(1) if _gw_match else None
+            logger.info(f"Active default-route IP: {active_ip}")
+        except Exception:
+            active_ip = None
+
+        try:
+            wired_candidates = {}
+            wifi_candidates  = {}
+            active_match     = None
+
             for iface_id, iface_obj in conf.ifaces.items():
                 desc = (getattr(iface_obj, "description", "") or
                         getattr(iface_obj, "name", "") or "").lower()
                 if any(s in desc for s in skip_desc):
                     continue
-                candidates_win[iface_id] = desc
+
+                # Check if this adapter owns the active default-route IP
+                iface_ip = getattr(iface_obj, "ip", None) or ""
+                if active_ip and iface_ip == active_ip:
+                    active_match = iface_id
+                    logger.info(f"Found active-route adapter: {iface_id} ({desc}) ip={iface_ip}")
+
+                if any(k in desc for k in wifi_keywords):
+                    wifi_candidates[iface_id] = desc
+                else:
+                    wired_candidates[iface_id] = desc
+
+            # Priority: active-route adapter > wired > wifi
+            if active_match:
+                desc = (wired_candidates.get(active_match) or
+                        wifi_candidates.get(active_match) or "active-route adapter")
+                logger.info(f"Auto-selected active-route adapter: {active_match} ({desc})")
+                return active_match
 
             # First pass — prefer clearly wired adapters
-            for iface_id, desc in candidates_win.items():
+            for iface_id, desc in wired_candidates.items():
                 if any(k in desc for k in wired_keywords):
-                    logger.info(f"Auto-selected Windows adapter: {iface_id} ({desc})")
+                    logger.info(f"Auto-selected wired adapter: {iface_id} ({desc})")
                     return iface_id
 
-            # Second pass — any non-skipped adapter
-            if candidates_win:
-                iface_id = next(iter(candidates_win))
-                logger.info(f"Auto-selected Windows adapter (2nd pass): {iface_id} ({candidates_win[iface_id]})")
+            # Second pass — Wi-Fi adapter (user may be on wireless)
+            if wifi_candidates:
+                iface_id = next(iter(wifi_candidates))
+                logger.info(f"Auto-selected Wi-Fi adapter: {iface_id} ({wifi_candidates[iface_id]})")
+                return iface_id
+
+            # Third pass — any non-skipped adapter
+            all_candidates = {**wired_candidates, **wifi_candidates}
+            if all_candidates:
+                iface_id = next(iter(all_candidates))
+                logger.info(f"Auto-selected adapter (2nd pass): {iface_id} ({all_candidates[iface_id]})")
                 return iface_id
         except Exception as e:
             logger.warning(f"Windows iface detection via conf.ifaces failed: {e}")

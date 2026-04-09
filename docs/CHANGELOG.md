@@ -5,6 +5,63 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.2.1] — 2026-04-08 — n8n Workflow Fixes + SLA + Board Report
+
+### Fixed — n8n Code Nodes: HTTP Calls Blocked by JS Task Runner Sandbox
+
+**Problem:** n8n 2.15 introduced a strict JS Task Runner sandbox that blocks ALL outbound HTTP inside Code nodes — `fetch`, `require('https')`, and `$helpers.httpRequest` all throw errors. Workflows 02, 03, and 05 were calling the OpenAI API from inside Code nodes.
+
+**Fix:** Replaced the Code node LLM calls with dedicated **HTTP Request nodes** (typeVersion 4.2). The Code node now only builds the prompt (`Build AI Prompt` / `Build Board Prompt`), and the HTTP Request node handles the API call.
+
+```
+Before: [Code node: build prompt + call OpenAI] → sandbox blocks HTTP → error
+After:  [Code node: build prompt] → [HTTP Request node: POST api.openai.com] → [Code node: parse + format]
+```
+
+All three workflows (02, 03, 05) now use this pattern. The HTTP Request node is sandbox-safe.
+
+---
+
+### Fixed — SLA Watchdog: "Open Incidents: 0" When 900+ Incidents Exist
+
+**Problem:** n8n HTTP Request node (typeVersion 4.2) splits JSON array responses into multiple items. `$input.first().json.incidents` was looking for an `.incidents` key on a single incident object → `undefined` → empty array.
+
+**Fix:** Changed to `$input.all()` to collect all split items:
+
+```js
+const items = $input.all();
+const incidents = items.length > 0 && Array.isArray(items[0].json)
+  ? items[0].json
+  : items.map(function(i){ return i.json; }).filter(function(i){ return i && i.incident_id; });
+```
+
+Also fixed field names in `Build Slack SLA Alert` to match `IncidentResponse` schema:
+- `inc.id` → `inc.incident_id || inc.id`
+- `inc.threat_type` → `inc.threat_type || inc.type || inc.title`
+- `inc.src_ip` → `inc.affected_ips && inc.affected_ips[0]`
+
+---
+
+### Fixed — Board Report: CRITICAL/HIGH Open Always 0
+
+**Two root causes fixed:**
+
+1. **Wrong dashboard URL** — WF05 was calling `/api/v1/dashboard/stats` (404). Fixed to `/api/v1/dashboard`.
+
+2. **Wrong field names** — `stats.total_alerts` → `stats.total_alerts_24h`, `stats.total_incidents` → `stats.active_incidents`.
+
+3. **Incidents array split** — Same n8n array splitting issue as SLA Watchdog. Fixed with `$('Fetch Open Incidents').all()` in `Aggregate Weekly Metrics`.
+
+---
+
+### Fixed — Build Approval Payload (WF04): Title Showed "0 breached, 0 warning"
+
+**Problem:** Code read `d.breached` from the Slack payload object, which has no `.breached` field at that point.
+
+**Fix:** Read counts from `d.text` instead (e.g., `"SLA Alert: 4 breached, 1 warning"`), which is always set by `Build Slack SLA Alert`.
+
+---
+
 ## [1.2.0] — 2026-04-06 — Pipeline Unification + UX Overhaul + Investigation Quality
 
 ### Changed — Traffic Simulator: Full DPI Pipeline (Major)
@@ -366,4 +423,4 @@ Gemini tested and abandoned:
 
 ---
 
-*Changelog — CyberSentinel AI v1.0/1.1/1.2 — 2025/2026*
+*Changelog — CyberSentinel AI v1.0/1.1/1.2/1.2.1 — 2025/2026*

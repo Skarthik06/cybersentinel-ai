@@ -1,14 +1,12 @@
 {
-  "name": "CyberSentinel — Critical Alert SOAR Playbook",
+  "name": "CyberSentinel \u2014 Critical Alert SOAR Playbook",
   "nodes": [
     {
       "parameters": {
         "httpMethod": "POST",
         "path": "critical-alert",
         "responseMode": "responseNode",
-        "options": {
-          "rawBody": false
-        }
+        "options": { "rawBody": false }
       },
       "id": "webhook-critical",
       "name": "Webhook: Critical Alert Trigger",
@@ -19,7 +17,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Parse and validate the incoming CyberSentinel alert\nconst alert = $input.first().json;\n\n// Normalize severity\nconst severity = (alert.severity || 'UNKNOWN').toUpperCase();\nconst type = alert.type || 'UNKNOWN';\nconst srcIp = alert.src_ip || 'N/A';\nconst dstIp = alert.dst_ip || 'N/A';\nconst mitre = alert.matched_mitre || alert.mitre_technique || 'N/A';\nconst score = alert.anomaly_score || alert.rlm_anomaly_score || 0;\nconst timestamp = alert.timestamp || new Date().toISOString();\n\n// Generate incident ID\nconst incidentId = `INC-${Date.now()}`;\n\n// Determine response playbook based on threat type\nlet playbook = 'STANDARD';\nif (type === 'C2_BEACON_DETECTED') playbook = 'C2_RESPONSE';\nelse if (type === 'ACTIVE_EXPLOITATION') playbook = 'EXPLOIT_RESPONSE';\nelse if (type === 'CRITICAL_CVE') playbook = 'CVE_RESPONSE';\nelse if (mitre === 'T1486') playbook = 'RANSOMWARE_RESPONSE';\nelse if (mitre === 'T1048') playbook = 'EXFIL_RESPONSE';\n\n// Severity emoji mapping\nconst emoji = { CRITICAL: '🚨', HIGH: '🔴', MEDIUM: '🟠', LOW: '🟡' };\n\nreturn [{\n  json: {\n    ...alert,\n    incidentId,\n    severity,\n    type,\n    srcIp,\n    dstIp,\n    mitre,\n    score: parseFloat(score).toFixed(3),\n    timestamp,\n    playbook,\n    emoji: emoji[severity] || '⚠️',\n    humanTime: new Date(timestamp).toUTCString(),\n    requiresAutoBlock: severity === 'CRITICAL' && score > 0.8,\n    requiresIsolation: playbook === 'RANSOMWARE_RESPONSE' || playbook === 'C2_RESPONSE',\n  }\n}];"
+        "jsCode": "const alert = $input.first().json;\nconst severity = (alert.severity || 'UNKNOWN').toUpperCase();\nconst type = alert.type || 'UNKNOWN';\nconst srcIp = alert.src_ip || 'N/A';\nconst dstIp = alert.dst_ip || 'N/A';\nconst mitre = alert.matched_mitre || alert.mitre_technique || 'N/A';\nconst score = parseFloat(alert.anomaly_score || alert.rlm_anomaly_score || 0);\nconst timestamp = alert.timestamp || new Date().toISOString();\nconst incidentId = `INC-${Date.now()}`;\nlet playbook = 'STANDARD';\nif (type === 'C2_BEACON_DETECTED') playbook = 'C2_RESPONSE';\nelse if (type === 'ACTIVE_EXPLOITATION') playbook = 'EXPLOIT_RESPONSE';\nelse if (mitre === 'T1486') playbook = 'RANSOMWARE_RESPONSE';\nelse if (mitre === 'T1048') playbook = 'EXFIL_RESPONSE';\nconst emojiMap = { CRITICAL: '\ud83d\udea8', HIGH: '\ud83d\udd34', MEDIUM: '\ud83d\udfe0', LOW: '\ud83d\udfe1' };\nreturn [{ json: { ...alert, incidentId, severity, type, srcIp, dstIp, mitre, score: score.toFixed(3), timestamp, playbook, emoji: emojiMap[severity] || '\u26a0\ufe0f', humanTime: new Date(timestamp).toUTCString(), shouldBlock: severity === 'CRITICAL' && score > 0.8 } }];"
       },
       "id": "parse-alert",
       "name": "Parse & Enrich Alert",
@@ -29,18 +27,20 @@
     },
     {
       "parameters": {
-        "url": "={{ $env.CYBERSENTINEL_API_URL }}/api/v1/hosts/{{ $json.srcIp }}",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth",
-        "options": {
-          "response": { "response": { "neverError": true } }
-        }
+        "url": "=http://host.docker.internal:8080/api/v1/hosts/{{ $json.srcIp }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer placeholder-token" }
+          ]
+        },
+        "options": { "response": { "response": { "neverError": true } } }
       },
       "id": "get-host-intel",
       "name": "Get Host Intelligence",
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4,
-      "position": [680, 300]
+      "typeVersion": 4.2,
+      "position": [680, 200]
     },
     {
       "parameters": {
@@ -48,7 +48,7 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Key", "value": "={{ $env.ABUSEIPDB_KEY }}" },
+            { "name": "Key", "value": "=placeholder-abuseipdb-key" },
             { "name": "Accept", "value": "application/json" }
           ]
         },
@@ -59,30 +59,28 @@
             { "name": "maxAgeInDays", "value": "90" }
           ]
         },
-        "options": {
-          "response": { "response": { "neverError": true } }
-        }
+        "options": { "response": { "response": { "neverError": true } } }
       },
       "id": "ip-reputation",
       "name": "Check IP Reputation (AbuseIPDB)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4,
-      "position": [680, 480]
+      "position": [680, 400]
     },
     {
       "parameters": {
-        "jsCode": "// Merge host intel + IP reputation with alert data\nconst alert = $('Parse & Enrich Alert').item.json;\nconst hostData = $('Get Host Intelligence').item.json;\nconst abuseData = $('Check IP Reputation (AbuseIPDB)').item.json?.data || {};\n\nconst abuseScore = abuseData.abuseConfidenceScore || 0;\nconst country = abuseData.countryCode || 'Unknown';\nconst isp = abuseData.isp || 'Unknown';\nconst totalReports = abuseData.totalReports || 0;\n\nconst profile = hostData.profile || {};\nconst anomalyScore = profile.anomaly_score || alert.anomaly_score || 0;\nconst observationCount = profile.observation_count || 0;\n\n// Combined threat score (weighted average)\nconst combinedScore = (\n  parseFloat(anomalyScore) * 0.6 +\n  (abuseScore / 100) * 0.4\n).toFixed(3);\n\n// Final verdict\nlet verdict = 'INVESTIGATE';\nif (combinedScore > 0.75 || abuseScore > 80) verdict = 'MALICIOUS_CONFIRMED';\nelse if (combinedScore > 0.5 || abuseScore > 50) verdict = 'LIKELY_MALICIOUS';\nelse if (combinedScore < 0.2 && abuseScore < 10) verdict = 'LIKELY_BENIGN';\n\nreturn [{\n  json: {\n    ...alert,\n    hostIntel: {\n      isBlocked: hostData.is_blocked || false,\n      isIsolated: hostData.is_isolated || false,\n      blockCount: hostData.block_count || 0,\n      profile: profile,\n    },\n    ipReputation: { abuseScore, country, isp, totalReports },\n    combinedScore,\n    verdict,\n    shouldBlock: verdict === 'MALICIOUS_CONFIRMED' && !hostData.is_blocked,\n    shouldCreateTicket: true,\n    shouldPage: alert.severity === 'CRITICAL',\n  }\n}];"
+        "jsCode": "const alert = $('Parse & Enrich Alert').item.json;\nconst hostData = $('Get Host Intelligence').item.json;\nconst abuseData = $('Check IP Reputation (AbuseIPDB)').item.json?.data || {};\nconst abuseScore = abuseData.abuseConfidenceScore || 0;\nconst country = abuseData.countryCode || 'Unknown';\nconst isp = abuseData.isp || 'Unknown';\nconst profile = hostData.profile || {};\nconst anomalyScore = parseFloat(profile.anomaly_score || alert.score || 0);\nconst combinedScore = (anomalyScore * 0.6 + (abuseScore / 100) * 0.4).toFixed(3);\nlet verdict = 'INVESTIGATE';\nif (combinedScore > 0.75 || abuseScore > 80) verdict = 'MALICIOUS_CONFIRMED';\nelse if (combinedScore > 0.5 || abuseScore > 50) verdict = 'LIKELY_MALICIOUS';\nelse if (combinedScore < 0.2 && abuseScore < 10) verdict = 'LIKELY_BENIGN';\nreturn [{ json: { ...alert, hostIntel: { isBlocked: hostData.is_blocked || false, blockCount: hostData.block_count || 0, incidentCount: hostData.incident_count || 0 }, ipReputation: { abuseScore, country, isp, totalReports: abuseData.totalReports || 0 }, combinedScore, verdict, shouldBlock: verdict === 'MALICIOUS_CONFIRMED' && !hostData.is_blocked } }];"
       },
       "id": "correlate-intel",
       "name": "Correlate Intelligence",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [900, 380]
+      "position": [900, 300]
     },
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true },
+          "options": {},
           "conditions": [
             {
               "id": "block-condition",
@@ -101,125 +99,53 @@
     },
     {
       "parameters": {
-        "url": "={{ $env.CYBERSENTINEL_API_URL }}/api/v1/block-ip",
+        "url": "=http://host.docker.internal:8080/api/v1/incidents/{{ $('Correlate Intelligence').item.json.incidentId }}/block",
         "method": "POST",
-        "sendBody": true,
-        "bodyParameters": {
+        "sendHeaders": true,
+        "headerParameters": {
           "parameters": [
-            { "name": "ip_address", "value": "={{ $('Correlate Intelligence').item.json.srcIp }}" },
-            { "name": "duration_hours", "value": "24" },
-            { "name": "justification", "value": "Auto-blocked by n8n SOAR: {{ $('Correlate Intelligence').item.json.verdict }} | Score: {{ $('Correlate Intelligence').item.json.combinedScore }}" },
-            { "name": "incident_id", "value": "={{ $('Correlate Intelligence').item.json.incidentId }}" }
+            { "name": "Authorization", "value": "=Bearer placeholder-token" }
           ]
         },
-        "options": {}
+        "options": { "response": { "response": { "neverError": true } } }
       },
       "id": "block-ip",
       "name": "Block IP (CyberSentinel API)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4,
-      "position": [1340, 200]
+      "position": [1340, 180]
     },
     {
       "parameters": {
-        "url": "={{ $env.CYBERSENTINEL_API_URL }}/api/v1/incidents",
-        "method": "POST",
-        "sendBody": true,
-        "bodyParameters": {
-          "parameters": [
-            { "name": "title", "value": "[{{ $('Correlate Intelligence').item.json.severity }}] {{ $('Correlate Intelligence').item.json.type }} from {{ $('Correlate Intelligence').item.json.srcIp }}" },
-            { "name": "severity", "value": "={{ $('Correlate Intelligence').item.json.severity }}" },
-            { "name": "description", "value": "={{ $('Correlate Intelligence').item.json.type }} detected. Source: {{ $('Correlate Intelligence').item.json.srcIp }} → {{ $('Correlate Intelligence').item.json.dstIp }}. MITRE: {{ $('Correlate Intelligence').item.json.mitre }}. Anomaly Score: {{ $('Correlate Intelligence').item.json.combinedScore }}. Verdict: {{ $('Correlate Intelligence').item.json.verdict }}. AbuseIPDB Score: {{ $('Correlate Intelligence').item.json.ipReputation.abuseScore }}%" },
-            { "name": "affected_ips", "value": "={{ JSON.stringify([$('Correlate Intelligence').item.json.srcIp, $('Correlate Intelligence').item.json.dstIp]) }}" },
-            { "name": "mitre_techniques", "value": "={{ JSON.stringify([$('Correlate Intelligence').item.json.mitre]) }}" }
-          ]
-        },
-        "options": {}
+        "jsCode": "const d = $('Correlate Intelligence').item.json;\nconst blockedLine = d.shouldBlock ? '*Auto-Block:* \u2705 IP blocked by SOAR' : '*Auto-Block:* \u274c Not auto-blocked \u2014 review in dashboard';\nconst abuseInfo = d.ipReputation.abuseScore > 0 ? `AbuseIPDB: ${d.ipReputation.abuseScore}% | Country: ${d.ipReputation.country} | ISP: ${d.ipReputation.isp}` : 'AbuseIPDB: No prior reports';\nconst dashUrl = 'http://localhost:5173';\nreturn [{ json: { channel: 'C0ANVSMJTH9', text: `${d.emoji} CyberSentinel SOAR \u2014 ${d.severity}: ${d.type}`, blocks: [{ type: 'header', text: { type: 'plain_text', text: `${d.emoji} ${d.severity} \u2014 ${d.type}` } }, { type: 'section', fields: [{ type: 'mrkdwn', text: '*Source IP:*\n`' + d.srcIp + '`' }, { type: 'mrkdwn', text: '*Destination:*\n`' + d.dstIp + '`' }, { type: 'mrkdwn', text: '*MITRE ATT&CK:*\n`' + d.mitre + '`' }, { type: 'mrkdwn', text: '*Playbook:*\n`' + d.playbook + '`' }, { type: 'mrkdwn', text: `*Threat Score:*\n${d.combinedScore}` }, { type: 'mrkdwn', text: `*Verdict:*\n${d.verdict}` }] }, { type: 'section', text: { type: 'mrkdwn', text: `${blockedLine}\n${abuseInfo}` } }, { type: 'divider' }, { type: 'context', elements: [{ type: 'mrkdwn', text: 'Incident: `' + d.incidentId + '`  |  ' + d.humanTime + '  |  <' + dashUrl + '|Open Dashboard>' }] }] } }];"
       },
-      "id": "create-incident",
-      "name": "Create Incident Record",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4,
-      "position": [1340, 420]
-    },
-    {
-      "parameters": {
-        "url": "={{ $env.JIRA_BASE_URL }}/rest/api/3/issue",
-        "method": "POST",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpBasicAuth",
-        "sendBody": true,
-        "contentType": "json",
-        "body": "={\n  \"fields\": {\n    \"project\": { \"key\": \"SOC\" },\n    \"summary\": \"[{{ $('Correlate Intelligence').item.json.severity }}] {{ $('Correlate Intelligence').item.json.type }} - {{ $('Correlate Intelligence').item.json.srcIp }}\",\n    \"description\": {\n      \"type\": \"doc\", \"version\": 1,\n      \"content\": [{\n        \"type\": \"paragraph\",\n        \"content\": [{\"type\": \"text\", \"text\": \"Threat detected by CyberSentinel AI.\\n\\nType: {{ $('Correlate Intelligence').item.json.type }}\\nSeverity: {{ $('Correlate Intelligence').item.json.severity }}\\nSource IP: {{ $('Correlate Intelligence').item.json.srcIp }}\\nDestination: {{ $('Correlate Intelligence').item.json.dstIp }}\\nMITRE: {{ $('Correlate Intelligence').item.json.mitre }}\\nCombined Score: {{ $('Correlate Intelligence').item.json.combinedScore }}\\nVerdict: {{ $('Correlate Intelligence').item.json.verdict }}\\nAbuseIPDB: {{ $('Correlate Intelligence').item.json.ipReputation.abuseScore }}% confidence\\nCountry: {{ $('Correlate Intelligence').item.json.ipReputation.country }}\\nISP: {{ $('Correlate Intelligence').item.json.ipReputation.isp }}\"}]\n      }]\n    },\n    \"issuetype\": { \"name\": \"Security Incident\" },\n    \"priority\": { \"name\": \"{{ $('Correlate Intelligence').item.json.severity === 'CRITICAL' ? 'Highest' : $('Correlate Intelligence').item.json.severity === 'HIGH' ? 'High' : 'Medium' }}\" },\n    \"labels\": [\"cybersentinel\", \"{{ $('Correlate Intelligence').item.json.playbook.toLowerCase() }}\", \"mitre-{{ $('Correlate Intelligence').item.json.mitre.toLowerCase().replace('.', '-') }}\"]\n  }\n}",
-        "options": { "response": { "response": { "neverError": true } } }
-      },
-      "id": "create-jira",
-      "name": "Create Jira Security Ticket",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4,
+      "id": "build-slack-payload",
+      "name": "Build Slack Alert Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [1560, 300]
     },
     {
       "parameters": {
-        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "url": "https://slack.com/api/chat.postMessage",
         "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json; charset=utf-8" }
+          ]
+        },
         "sendBody": true,
         "contentType": "json",
-        "body": "={\n  \"blocks\": [\n    {\n      \"type\": \"header\",\n      \"text\": { \"type\": \"plain_text\", \"text\": \"{{ $('Correlate Intelligence').item.json.emoji }} CyberSentinel CRITICAL ALERT\" }\n    },\n    {\n      \"type\": \"section\",\n      \"fields\": [\n        { \"type\": \"mrkdwn\", \"text\": \"*Type:*\\n{{ $('Correlate Intelligence').item.json.type }}\" },\n        { \"type\": \"mrkdwn\", \"text\": \"*Severity:*\\n{{ $('Correlate Intelligence').item.json.severity }}\" },\n        { \"type\": \"mrkdwn\", \"text\": \"*Source IP:*\\n`{{ $('Correlate Intelligence').item.json.srcIp }}`\" },\n        { \"type\": \"mrkdwn\", \"text\": \"*MITRE ATT&CK:*\\n`{{ $('Correlate Intelligence').item.json.mitre }}`\" },\n        { \"type\": \"mrkdwn\", \"text\": \"*Threat Score:*\\n{{ $('Correlate Intelligence').item.json.combinedScore }}\" },\n        { \"type\": \"mrkdwn\", \"text\": \"*Verdict:*\\n{{ $('Correlate Intelligence').item.json.verdict }}\" },\n        { \"type\": \"mrkdwn\", \"text\": \"*Country:*\\n{{ $('Correlate Intelligence').item.json.ipReputation.country }}\" },\n        { \"type\": \"mrkdwn\", \"text\": \"*ISP:*\\n{{ $('Correlate Intelligence').item.json.ipReputation.isp }}\" }\n      ]\n    },\n    {\n      \"type\": \"section\",\n      \"text\": { \"type\": \"mrkdwn\", \"text\": \"*Playbook:* `{{ $('Correlate Intelligence').item.json.playbook }}`  |  *Auto-Blocked:* {{ $('Correlate Intelligence').item.json.shouldBlock ? '✅ YES' : '❌ NO' }}\" }\n    },\n    { \"type\": \"divider\" },\n    {\n      \"type\": \"context\",\n      \"elements\": [{ \"type\": \"mrkdwn\", \"text\": \"Incident: `{{ $('Correlate Intelligence').item.json.incidentId }}`  |  {{ $('Correlate Intelligence').item.json.humanTime }}\" }]\n    }\n  ]\n}",
+        "body": "={{ JSON.stringify($json) }}",
         "options": { "response": { "response": { "neverError": true } } }
       },
       "id": "slack-alert",
-      "name": "Slack: SOC Notification",
+      "name": "Slack: Post Alert",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4,
-      "position": [1780, 200]
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "options": {},
-          "conditions": [{
-            "leftValue": "={{ $('Correlate Intelligence').item.json.shouldPage }}",
-            "rightValue": true,
-            "operator": { "type": "boolean", "operation": "equals" }
-          }]
-        }
-      },
-      "id": "should-page",
-      "name": "Should Page On-Call?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2,
-      "position": [1780, 420]
-    },
-    {
-      "parameters": {
-        "url": "https://events.pagerduty.com/v2/enqueue",
-        "method": "POST",
-        "sendBody": true,
-        "contentType": "json",
-        "body": "={\n  \"routing_key\": \"{{ $env.PAGERDUTY_API_KEY }}\",\n  \"event_action\": \"trigger\",\n  \"dedup_key\": \"{{ $('Correlate Intelligence').item.json.incidentId }}\",\n  \"payload\": {\n    \"summary\": \"[CRITICAL] {{ $('Correlate Intelligence').item.json.type }} from {{ $('Correlate Intelligence').item.json.srcIp }}\",\n    \"source\": \"CyberSentinel AI\",\n    \"severity\": \"critical\",\n    \"component\": \"Network Security\",\n    \"group\": \"SOC\",\n    \"custom_details\": {\n      \"mitre_technique\": \"{{ $('Correlate Intelligence').item.json.mitre }}\",\n      \"combined_score\": \"{{ $('Correlate Intelligence').item.json.combinedScore }}\",\n      \"verdict\": \"{{ $('Correlate Intelligence').item.json.verdict }}\",\n      \"playbook\": \"{{ $('Correlate Intelligence').item.json.playbook }}\",\n      \"auto_blocked\": \"{{ $('Correlate Intelligence').item.json.shouldBlock }}\"\n    }\n  }\n}",
-        "options": { "response": { "response": { "neverError": true } } }
-      },
-      "id": "pagerduty",
-      "name": "PagerDuty: Page On-Call",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4,
-      "position": [2000, 340]
-    },
-    {
-      "parameters": {
-        "url": "={{ $env.TEAMS_WEBHOOK_URL }}",
-        "method": "POST",
-        "sendBody": true,
-        "contentType": "json",
-        "body": "={\n  \"@type\": \"MessageCard\",\n  \"@context\": \"http://schema.org/extensions\",\n  \"themeColor\": \"{{ $('Correlate Intelligence').item.json.severity === 'CRITICAL' ? 'FF0000' : 'FF8C00' }}\",\n  \"summary\": \"CyberSentinel Alert: {{ $('Correlate Intelligence').item.json.type }}\",\n  \"sections\": [{\n    \"activityTitle\": \"{{ $('Correlate Intelligence').item.json.emoji }} {{ $('Correlate Intelligence').item.json.severity }} — {{ $('Correlate Intelligence').item.json.type }}\",\n    \"activitySubtitle\": \"{{ $('Correlate Intelligence').item.json.humanTime }}\",\n    \"facts\": [\n      { \"name\": \"Source IP\", \"value\": \"{{ $('Correlate Intelligence').item.json.srcIp }}\" },\n      { \"name\": \"MITRE\", \"value\": \"{{ $('Correlate Intelligence').item.json.mitre }}\" },\n      { \"name\": \"Score\", \"value\": \"{{ $('Correlate Intelligence').item.json.combinedScore }}\" },\n      { \"name\": \"Verdict\", \"value\": \"{{ $('Correlate Intelligence').item.json.verdict }}\" },\n      { \"name\": \"Incident ID\", \"value\": \"{{ $('Correlate Intelligence').item.json.incidentId }}\" }\n    ]\n  }]\n}",
-        "options": { "response": { "response": { "neverError": true } } }
-      },
-      "id": "teams-alert",
-      "name": "MS Teams: Security Channel",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4,
-      "position": [2000, 520]
+      "position": [1780, 300]
     },
     {
       "parameters": {
@@ -230,45 +156,45 @@
       "name": "Respond to Bridge",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [2220, 300]
+      "position": [2000, 300]
     }
   ],
   "connections": {
-    "Webhook: Critical Alert Trigger": { "main": [[{ "node": "Parse & Enrich Alert", "type": "main", "index": 0 }]] },
+    "Webhook: Critical Alert Trigger": {
+      "main": [[{ "node": "Parse & Enrich Alert", "type": "main", "index": 0 }]]
+    },
     "Parse & Enrich Alert": {
       "main": [[
         { "node": "Get Host Intelligence", "type": "main", "index": 0 },
         { "node": "Check IP Reputation (AbuseIPDB)", "type": "main", "index": 0 }
       ]]
     },
-    "Get Host Intelligence": { "main": [[{ "node": "Correlate Intelligence", "type": "main", "index": 0 }]] },
-    "Check IP Reputation (AbuseIPDB)": { "main": [[{ "node": "Correlate Intelligence", "type": "main", "index": 0 }]] },
-    "Correlate Intelligence": { "main": [[{ "node": "Auto-Block Decision", "type": "main", "index": 0 }, { "node": "Create Incident Record", "type": "main", "index": 0 }]] },
+    "Get Host Intelligence": {
+      "main": [[{ "node": "Correlate Intelligence", "type": "main", "index": 0 }]]
+    },
+    "Check IP Reputation (AbuseIPDB)": {
+      "main": [[{ "node": "Correlate Intelligence", "type": "main", "index": 0 }]]
+    },
+    "Correlate Intelligence": {
+      "main": [[{ "node": "Auto-Block Decision", "type": "main", "index": 0 }]]
+    },
     "Auto-Block Decision": {
       "main": [
         [{ "node": "Block IP (CyberSentinel API)", "type": "main", "index": 0 }],
-        [{ "node": "Create Jira Security Ticket", "type": "main", "index": 0 }]
+        [{ "node": "Build Slack Alert Payload", "type": "main", "index": 0 }]
       ]
     },
-    "Block IP (CyberSentinel API)": { "main": [[{ "node": "Create Jira Security Ticket", "type": "main", "index": 0 }]] },
-    "Create Incident Record": { "main": [[{ "node": "Create Jira Security Ticket", "type": "main", "index": 0 }]] },
-    "Create Jira Security Ticket": { "main": [[{ "node": "Slack: SOC Notification", "type": "main", "index": 0 }, { "node": "Should Page On-Call?", "type": "main", "index": 0 }]] },
-    "Slack: SOC Notification": { "main": [[{ "node": "Respond to Bridge", "type": "main", "index": 0 }]] },
-    "Should Page On-Call?": {
-      "main": [
-        [{ "node": "PagerDuty: Page On-Call", "type": "main", "index": 0 }],
-        [{ "node": "MS Teams: Security Channel", "type": "main", "index": 0 }]
-      ]
+    "Block IP (CyberSentinel API)": {
+      "main": [[{ "node": "Build Slack Alert Payload", "type": "main", "index": 0 }]]
     },
-    "PagerDuty: Page On-Call": { "main": [[{ "node": "MS Teams: Security Channel", "type": "main", "index": 0 }]] },
-    "MS Teams: Security Channel": { "main": [[{ "node": "Respond to Bridge", "type": "main", "index": 0 }]] }
+    "Build Slack Alert Payload": {
+      "main": [[{ "node": "Slack: Post Alert", "type": "main", "index": 0 }]]
+    },
+    "Slack: Post Alert": {
+      "main": [[{ "node": "Respond to Bridge", "type": "main", "index": 0 }]]
+    }
   },
-  "active": true,
-  "settings": {
-    "executionOrder": "v1",
-    "saveManualExecutions": true,
-    "callerPolicy": "workflowsFromSameOwner",
-    "errorWorkflow": "cybersentinel-error-handler"
-  },
-  "tags": ["cybersentinel", "soar", "critical", "production"]
+  "active": false,
+  "settings": { "executionOrder": "v1", "saveManualExecutions": true, "callerPolicy": "workflowsFromSameOwner" },
+  "tags": [{"name": "cybersentinel"}, {"name": "soar"}, {"name": "critical"}, {"name": "production"}]
 }

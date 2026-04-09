@@ -104,35 +104,36 @@ Webhook: Critical Alert
 ### Node Sequence
 
 ```
-Schedule: 7AM Mon–Fri
+Schedule: 7AM Mon–Fri  OR  Manual Webhook
     │
     ▼ Authenticate API (POST /auth/token)
     │
-    ├──► Fetch Dashboard Stats (GET /api/v1/dashboard)
-    ├──► Fetch Top Critical Alerts (GET /api/v1/alerts?severity=CRITICAL)
-    └──► Fetch Open Incidents (GET /api/v1/incidents?status=OPEN)
-         │
-         ▼ LLM: Generate Report (reads LLM_PROVIDER from env)
-         │ 6 sections: Executive Summary, Key Metrics, Top 3 Threats,
-         │             MITRE Techniques, Recommended Actions, Trend
-         │
-         ▼ Build Report Package (JavaScript)
-         │ Calculates: risk level (NORMAL/ELEVATED/HIGH RISK/CRITICAL)
-         │
-         ├──► Slack: Post SOC Report (Block Kit format)
-         ├──► Email: HTML template with metric dashboard
-         └──► Teams: MessageCard for leadership channel
+    ▼ Fetch Dashboard Stats (GET /api/v1/dashboard)
+    │
+    ▼ Fetch Top Critical Alerts (GET /api/v1/alerts?severity=CRITICAL&hours=24&limit=10)
+    │
+    ▼ Fetch Open Incidents (GET /api/v1/incidents?status=OPEN)
+    │
+    ▼ Build AI Prompt (Code node — assembles prompt from data)
+    │ 5 sections: Executive Summary, Key Metrics, Top 3 Threats,
+    │             MITRE Techniques, Recommended Actions
+    │
+    ▼ Call OpenAI (HTTP Request → api.openai.com/v1/chat/completions)
+    │ model: gpt-4o-mini, max_tokens: 1024
+    │
+    ▼ Build Slack Report (Code node — formats Block Kit payload)
+    │ Calculates risk level: NORMAL / ELEVATED / HIGH RISK
+    │
+    ▼ Build Approval Payload (Code node)
+    │
+    ▼ Submit for Approval (POST /api/v1/reports/pending)
 ```
 
-### Model Selection by Provider
+> **Note (n8n 2.15+):** The LLM call is an HTTP Request node, not a Code node. n8n's JS Task Runner sandbox blocks all outbound HTTP in Code nodes. The Code node only builds the prompt; the HTTP Request node makes the API call.
 
-| LLM_PROVIDER | Model Used | Override via |
-|-------------|------------|-------------|
-| claude | claude-sonnet-4-6 | LLM_MODEL_ANALYSIS |
-| openai | gpt-4o-mini | LLM_MODEL_ANALYSIS |
-| gemini | gemini-2.5-flash | LLM_MODEL_ANALYSIS |
+### LLM Used
 
-The n8n workflow reads `$env.LLM_PROVIDER` at runtime — no workflow change needed when switching providers.
+Currently hardcoded to **OpenAI GPT-4o mini** via HTTP Request node. To switch providers, update the `Call OpenAI` node URL and Authorization header to point at your preferred provider's API.
 
 ---
 
@@ -190,12 +191,14 @@ All three fast-tier models complete the 3-sentence CVE impact analysis in under 
 
 ### SLA Thresholds
 
-| Severity | SLA Limit | Warning At | Breach Action |
-|----------|-----------|-----------|---------------|
-| CRITICAL | 15 minutes | 3 min remaining | PagerDuty page + Slack + ServiceNow P1 |
-| HIGH | 60 minutes | 12 min remaining | Slack alert + ServiceNow escalate |
-| MEDIUM | 4 hours | 48 min remaining | Slack warning only |
-| LOW | 24 hours | No warning | Log only |
+| Severity | SLA Limit | Warning Threshold | Breach Action |
+|----------|-----------|-------------------|---------------|
+| CRITICAL | 30 minutes | ≥ 80% (24 min) | PagerDuty page + Slack + ServiceNow P1 |
+| HIGH | 2 hours | ≥ 80% (96 min) | Slack alert + ServiceNow escalate |
+| MEDIUM | 8 hours | ≥ 80% (384 min) | Slack warning only |
+| LOW | 24 hours | ≥ 80% (1152 min) | Log only |
+
+Warning fires at ≥ 80% SLA consumed. Breach fires at ≥ 100%.
 
 ### Node Sequence
 
@@ -239,49 +242,46 @@ riskScore = min(100, CRITICAL*10 + HIGH*3 + MEDIUM*0.5 + open_incidents*5)
 ### Node Sequence
 
 ```
-Schedule: Monday 8AM
+Schedule: Monday 8AM  OR  Manual Webhook
     │
-    ▼ Authenticate API
+    ▼ Authenticate API (POST /auth/token)
     │
-    ├──► Fetch 7-day Dashboard Stats
-    ├──► Fetch All Alerts (7 days, limit 200)
-    ├──► Fetch Open Incidents
-    └──► Fetch Resolved This Week
-         │
-         ▼ Aggregate Weekly Metrics (JavaScript)
-         │
-         ▼ LLM (primary tier): Generate Board Report
-         │ 9 mandatory sections (board-ready, no jargon)
-         │
-         ├──► Slack: Executive Summary (condensed)
-         ├──► Email: Full HTML report to BOARD_EMAIL
-         ├──► Teams: Leadership Channel MessageCard
-         └──► Jira: Weekly Review Ticket (audit trail)
+    ▼ Fetch Dashboard Stats (GET /api/v1/dashboard)
+    │
+    ▼ Fetch Open Incidents (GET /api/v1/incidents?limit=100&status=OPEN)
+    │
+    ▼ Aggregate Weekly Metrics (Code node — $input.all() for incident array)
+    │ Fields: open_critical, open_high, open_medium, open_low,
+    │         total_alerts, blocked_ips, top_threats, avg_response_time
+    │
+    ▼ Build Board Prompt (Code node — assembles prompt + system prompt)
+    │
+    ▼ Call OpenAI (HTTP Request → api.openai.com/v1/chat/completions)
+    │ model: gpt-4o-mini, max_tokens: 800, temperature: 0.2
+    │
+    ▼ Build Slack Board Report (Code node — formats Block Kit payload)
+    │
+    ▼ Build Approval Payload (Code node)
+    │
+    ▼ Submit for Approval (POST /api/v1/reports/pending)
 ```
+
+> **Note (n8n 2.15+):** Same sandbox constraint as WF02 — LLM call is an HTTP Request node.
+> **Note on incidents:** `Aggregate Weekly Metrics` uses `$('Fetch Open Incidents').all()` to collect all items after n8n splits the JSON array response.
 
 ### Board Report Sections
 
 | # | Section |
 |---|---------|
-| 1 | Executive Summary (3–4 sentences, overall posture) |
-| 2 | Risk Posture (current level, trend vs last week) |
-| 3 | Key Metrics This Week (numbers with business context) |
-| 4 | Threat Landscape (what attackers are doing) |
-| 5 | Critical Incidents Requiring Action |
-| 6 | Security Investments Performance (ROI indicators) |
-| 7 | Compliance & Regulatory Posture (GDPR, SOC2, HIPAA) |
-| 8 | Recommended Board Actions (3–5 specific items) |
-| 9 | Outlook Next Week (emerging threats, patch deadlines) |
+| 1 | Executive Summary |
+| 2 | Key Threats |
+| 3 | Response Effectiveness |
+| 4 | Recommendations |
+| 5 | Next Week Outlook |
 
-### Primary Tier Model by Provider
+### LLM Used
 
-| LLM_PROVIDER | Model Used | Override via |
-|-------------|------------|-------------|
-| claude | claude-opus-4-5 | LLM_MODEL_PRIMARY |
-| openai | gpt-4o-mini | LLM_MODEL_PRIMARY |
-| gemini | gemini-2.5-flash | LLM_MODEL_PRIMARY |
-
-The primary tier is used because board reports require nuanced business translation and multi-paragraph structured writing. Set `LLM_MODEL_PRIMARY=gpt-4o` to use the full GPT-4o for higher quality board prose.
+Currently hardcoded to **OpenAI GPT-4o mini** via HTTP Request node (same as WF02). To switch to full GPT-4o for higher quality prose, update the `Call OpenAI` node body: change `gpt-4o-mini` to `gpt-4o`.
 
 ---
 
@@ -302,23 +302,15 @@ After importing workflows, configure these in n8n Settings → Credentials:
 
 ---
 
-## LLM Provider Configuration for n8n
+## LLM Configuration for n8n
 
-Workflows 02, 03, and 05 call an LLM for AI-generated content. They read `$env.LLM_PROVIDER` at runtime — no workflow changes needed when switching providers.
+Workflows 02, 03, and 05 call OpenAI GPT-4o mini directly via an HTTP Request node.
 
-**Setup:**
+**Current implementation:** The `Call OpenAI` node in WF02/03/05 calls `https://api.openai.com/v1/chat/completions` with a Bearer token in the Authorization header.
 
-```bash
-# In .env — set provider and matching key
-LLM_PROVIDER=openai
-OPENAI_API_KEY=sk-...
+**To switch models or providers:** Open the `Call OpenAI` node in n8n, update the URL and Authorization header for your preferred provider.
 
-# Then restart mcp-orchestrator and n8n services:
-docker compose up -d mcp-orchestrator
-docker compose up -d n8n
-```
-
-**In n8n:** Settings → Environment Variables → add `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY` for Claude, `GOOGLE_API_KEY` for Gemini).
+> **Why not `$env.LLM_PROVIDER`?** n8n 2.15 JS Task Runner sandbox blocks all HTTP from Code nodes. The HTTP Request node is required for external API calls — and HTTP Request nodes don't share env var routing logic. The simplest working approach is a direct HTTP Request to OpenAI.
 
 ---
 
@@ -355,4 +347,4 @@ curl -X POST http://localhost:5678/webhook/critical-cve \
 
 ---
 
-*SOAR Workflows — CyberSentinel AI v1.1 — 2025/2026*
+*SOAR Workflows — CyberSentinel AI v1.2.1 — 2025/2026*

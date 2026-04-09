@@ -84,6 +84,7 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SOC_EMAIL: ${SOC_EMAIL:-soc@cybersentinel.ai}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
 
     volumes:
       - n8n_data:/home/node/.n8n

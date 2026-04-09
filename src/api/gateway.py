@@ -11,6 +11,7 @@ from typing import List, Optional
 
 import asyncpg
 import chromadb
+import httpx
 from chromadb.utils import embedding_functions
 from src.agents.llm_provider import available_providers, get_provider
 from src.ingestion.embedder import (
@@ -157,6 +158,23 @@ class RemediationRequest(BaseModel):
 class StatusUpdateRequest(BaseModel):
     status: str  # INVESTIGATING | RESOLVED | CLOSED
     notes:  Optional[str] = None
+
+
+class PendingReportSubmit(BaseModel):
+    report_id:     str
+    workflow:      str   # daily_soc | sla_watchdog | board_report
+    title:         str
+    slack_payload: dict  # full {channel, text, blocks} ready to POST to Slack
+
+
+class PendingReportResponse(BaseModel):
+    report_id:    str
+    workflow:     str
+    title:        str
+    status:       str
+    created_at:   datetime
+    actioned_at:  Optional[datetime] = None
+    actioned_by:  Optional[str]      = None
 
 
 # ── Startup / shutdown ────────────────────────────────────────────────────────
@@ -881,6 +899,122 @@ async def metrics():
     ]
     from fastapi.responses import PlainTextResponse
     return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+
+
+# ── n8n Workflow Trigger Proxy ────────────────────────────────────────────────
+
+N8N_URL = os.getenv("N8N_URL", "http://host.docker.internal:5678")
+
+WORKFLOW_WEBHOOKS = {
+    "daily":  "run-daily-report",
+    "sla":    "run-sla-check",
+    "board":  "run-board-report",
+}
+
+@app.post("/api/v1/workflows/trigger/{workflow_id}")
+async def trigger_workflow(workflow_id: str, user: dict = Depends(get_current_user)):
+    """Proxy trigger to n8n webhook — avoids CORS from browser."""
+    if user.get("role") == "viewer":
+        raise HTTPException(status_code=403, detail="Viewers cannot trigger workflows")
+    path = WORKFLOW_WEBHOOKS.get(workflow_id)
+    if not path:
+        raise HTTPException(status_code=404, detail=f"Unknown workflow: {workflow_id}. Valid: {list(WORKFLOW_WEBHOOKS)}")
+    url = f"{N8N_URL}/webhook/{path}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(url, json={"triggered_by": user.get("username"), "timestamp": datetime.utcnow().isoformat()})
+        return {"workflow": workflow_id, "status": "triggered", "n8n_status": resp.status_code}
+    except httpx.ConnectError:
+        raise HTTPException(status_code=503, detail=f"n8n not reachable at {N8N_URL}. Check N8N_URL in .env")
+
+
+# ── Pending Reports (n8n approval queue) ─────────────────────────────────────
+
+@app.post("/api/v1/reports/pending", status_code=201)
+async def submit_pending_report(req: PendingReportSubmit):
+    """n8n calls this instead of Slack. Stores report for analyst approval."""
+    async with db_pool.acquire() as conn:
+        existing = await conn.fetchval(
+            "SELECT report_id FROM pending_reports WHERE report_id = $1", req.report_id
+        )
+        if existing:
+            return {"report_id": req.report_id, "status": "already_exists"}
+        await conn.execute(
+            """INSERT INTO pending_reports (report_id, workflow, title, slack_payload)
+               VALUES ($1, $2, $3, $4)""",
+            req.report_id, req.workflow, req.title, json.dumps(req.slack_payload)
+        )
+    return {"report_id": req.report_id, "status": "pending"}
+
+
+@app.get("/api/v1/reports/pending", response_model=List[PendingReportResponse])
+async def get_pending_reports(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    user: dict = Depends(get_current_user),
+):
+    """Return reports awaiting approval. Default: PENDING only."""
+    st = (status_filter or "PENDING").upper()
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT report_id, workflow, title, status, created_at, actioned_at, actioned_by
+               FROM pending_reports WHERE status = $1 ORDER BY created_at DESC""",
+            st
+        )
+    return [PendingReportResponse(**dict(r)) for r in rows]
+
+
+@app.post("/api/v1/reports/{report_id}/approve")
+async def approve_report(report_id: str, user: dict = Depends(get_current_user)):
+    """Approve: send Slack payload, mark APPROVED."""
+    if user.get("role") == "viewer":
+        raise HTTPException(status_code=403, detail="Viewers cannot approve reports")
+
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM pending_reports WHERE report_id = $1 AND status = 'PENDING'", report_id
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Pending report not found")
+
+    slack_token   = os.getenv("SLACK_BOT_TOKEN", "")
+    slack_payload = json.loads(row["slack_payload"])
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            "https://slack.com/api/chat.postMessage",
+            headers={"Authorization": f"Bearer {slack_token}", "Content-Type": "application/json"},
+            content=json.dumps(slack_payload),
+        )
+    slack_ok = resp.json().get("ok", False)
+    if not slack_ok:
+        raise HTTPException(status_code=502, detail=f"Slack error: {resp.json().get('error','unknown')}")
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE pending_reports
+               SET status = 'APPROVED', actioned_at = NOW(), actioned_by = $2
+               WHERE report_id = $1""",
+            report_id, user.get("username", "unknown")
+        )
+    return {"report_id": report_id, "status": "APPROVED", "slack_ok": slack_ok}
+
+
+@app.post("/api/v1/reports/{report_id}/deny")
+async def deny_report(report_id: str, user: dict = Depends(get_current_user)):
+    """Deny: discard without sending to Slack, mark DENIED."""
+    if user.get("role") == "viewer":
+        raise HTTPException(status_code=403, detail="Viewers cannot deny reports")
+
+    async with db_pool.acquire() as conn:
+        updated = await conn.execute(
+            """UPDATE pending_reports
+               SET status = 'DENIED', actioned_at = NOW(), actioned_by = $2
+               WHERE report_id = $1 AND status = 'PENDING'""",
+            report_id, user.get("username", "unknown")
+        )
+    if updated == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="Pending report not found")
+    return {"report_id": report_id, "status": "DENIED"}
 
 
 if __name__ == "__main__":
