@@ -4,14 +4,27 @@
     {
       "parameters": {
         "rule": {
-          "interval": [{ "field": "weeks", "weeksInterval": 1, "triggerAtDay": [1], "triggerAtHour": 8, "triggerAtMinute": 0 }]
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 1,
+              "triggerAtDay": [
+                1
+              ],
+              "triggerAtHour": 8,
+              "triggerAtMinute": 0
+            }
+          ]
         }
       },
       "id": "board-trigger",
       "name": "Monday 8AM",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.1,
-      "position": [240, 300]
+      "position": [
+        240,
+        300
+      ]
     },
     {
       "parameters": {
@@ -24,7 +37,10 @@
       "name": "Manual Trigger: Board Report",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 1,
-      "position": [240, 460],
+      "position": [
+        240,
+        460
+      ],
       "webhookId": "run-board-report"
     },
     {
@@ -35,8 +51,14 @@
         "contentType": "form-urlencoded",
         "bodyParameters": {
           "parameters": [
-            { "name": "username", "value": "admin" },
-            { "name": "password", "value": "cybersentinel2025" }
+            {
+              "name": "username",
+              "value": "admin"
+            },
+            {
+              "name": "password",
+              "value": "cybersentinel2025"
+            }
           ]
         },
         "options": {}
@@ -45,7 +67,10 @@
       "name": "Authenticate",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [460, 380]
+      "position": [
+        460,
+        380
+      ]
     },
     {
       "parameters": {
@@ -54,7 +79,10 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Authorization", "value": "=Bearer {{ $('Authenticate').item.json.access_token }}" }
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Authenticate').item.json.access_token }}"
+            }
           ]
         },
         "options": {}
@@ -63,7 +91,10 @@
       "name": "Fetch Dashboard Stats",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [660, 380]
+      "position": [
+        660,
+        380
+      ]
     },
     {
       "parameters": {
@@ -72,7 +103,10 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Authorization", "value": "=Bearer {{ $('Authenticate').item.json.access_token }}" }
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Authenticate').item.json.access_token }}"
+            }
           ]
         },
         "options": {}
@@ -81,7 +115,10 @@
       "name": "Fetch Open Incidents",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [860, 380]
+      "position": [
+        860,
+        380
+      ]
     },
     {
       "parameters": {
@@ -91,7 +128,10 @@
       "name": "Aggregate Weekly Metrics",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1060, 380]
+      "position": [
+        1060,
+        380
+      ]
     },
     {
       "parameters": {
@@ -101,7 +141,10 @@
       "name": "Build Board Prompt",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1260, 380]
+      "position": [
+        1260,
+        380
+      ]
     },
     {
       "parameters": {
@@ -110,8 +153,14 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Authorization", "value": "=Bearer {{ $env.OPENAI_API_KEY }}" },
-            { "name": "Content-Type", "value": "application/json" }
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
           ]
         },
         "sendBody": true,
@@ -124,27 +173,36 @@
       "name": "Call OpenAI",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1460, 380]
+      "position": [
+        1460,
+        380
+      ]
     },
     {
       "parameters": {
-        "jsCode": "const report = ($json.choices && $json.choices[0]) ? $json.choices[0].message.content : 'Report generation failed \u2014 check OpenAI API key';\nconst metrics = $('Build Board Prompt').item.json.metrics;\nconst blocks = [{ type: 'header', text: { type: 'plain_text', text: '\uD83D\uDCCA Weekly Security Board Report', emoji: true } }, { type: 'section', text: { type: 'mrkdwn', text: '*Period:* ' + metrics.week_start + ' \u2192 ' + metrics.week_end } }, { type: 'divider' }, { type: 'section', fields: [{ type: 'mrkdwn', text: '*CRITICAL Open:* ' + metrics.open_critical }, { type: 'mrkdwn', text: '*HIGH Open:* ' + metrics.open_high }, { type: 'mrkdwn', text: '*IPs Blocked:* ' + metrics.blocked_ips }, { type: 'mrkdwn', text: '*Resolved:* ' + metrics.resolved_this_week }, { type: 'mrkdwn', text: '*Total Alerts:* ' + metrics.total_alerts }, { type: 'mrkdwn', text: '*Avg Response:* ' + metrics.avg_response_time + ' min' }] }, { type: 'divider' }, { type: 'section', text: { type: 'mrkdwn', text: report.length > 2900 ? report.slice(0,2900) + '...' : report } }, { type: 'divider' }, { type: 'context', elements: [{ type: 'mrkdwn', text: 'CyberSentinel AI \u00B7 Weekly Board Report \u00B7 Every Monday 8AM' }] }];\nreturn [{ json: { channel: 'C0ANVSMJTH9', text: 'Weekly Security Report: ' + metrics.week_start + ' to ' + metrics.week_end, blocks: blocks } }];"
+        "jsCode": "const report = ($json.choices && $json.choices[0]) ? $json.choices[0].message.content : 'Report generation failed — check OpenAI API key';\nconst metrics = $('Build Board Prompt').item.json.metrics;\nconst blocks = [{ type: 'header', text: { type: 'plain_text', text: '📊 Weekly Security Board Report', emoji: true } }, { type: 'section', text: { type: 'mrkdwn', text: '*Period:* ' + metrics.week_start + ' → ' + metrics.week_end } }, { type: 'divider' }, { type: 'section', fields: [{ type: 'mrkdwn', text: '*CRITICAL Open:* ' + metrics.open_critical }, { type: 'mrkdwn', text: '*HIGH Open:* ' + metrics.open_high }, { type: 'mrkdwn', text: '*IPs Blocked:* ' + metrics.blocked_ips }, { type: 'mrkdwn', text: '*Resolved:* ' + metrics.resolved_this_week }, { type: 'mrkdwn', text: '*Total Alerts:* ' + metrics.total_alerts }, { type: 'mrkdwn', text: '*Avg Response:* ' + metrics.avg_response_time + ' min' }] }, { type: 'divider' }, { type: 'section', text: { type: 'mrkdwn', text: report.length > 2900 ? report.slice(0,2900) + '...' : report } }, { type: 'divider' }, { type: 'context', elements: [{ type: 'mrkdwn', text: 'CyberSentinel AI · Weekly Board Report · Every Monday 8AM' }] }];\nreturn [{ json: { channel: 'C0ANVSMJTH9', text: 'Weekly Security Report: ' + metrics.week_start + ' to ' + metrics.week_end, blocks: blocks } }];"
       },
       "id": "board-build-slack",
       "name": "Build Slack Board Report",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1660, 380]
+      "position": [
+        1660,
+        380
+      ]
     },
     {
       "parameters": {
-        "jsCode": "const d = $input.first().json;\nconst reportId = 'board-' + new Date().toISOString().slice(0,10) + '-' + Date.now().toString(36);\nreturn [{ json: { report_id: reportId, workflow: 'board_report', title: 'Weekly Board Report \u2014 ' + new Date().toISOString().slice(0,10), slack_payload: d } }];"
+        "jsCode": "const d = $input.first().json;\nconst reportId = 'board-' + new Date().toISOString().slice(0,10) + '-' + Date.now().toString(36);\nreturn [{ json: { report_id: reportId, workflow: 'board_report', title: 'Weekly Board Report — ' + new Date().toISOString().slice(0,10), slack_payload: d } }];"
       },
       "id": "board-build-approval",
       "name": "Build Approval Payload",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1860, 380]
+      "position": [
+        1860,
+        380
+      ]
     },
     {
       "parameters": {
@@ -152,57 +210,165 @@
         "method": "POST",
         "sendHeaders": true,
         "headerParameters": {
-          "parameters": [{ "name": "Content-Type", "value": "application/json" }]
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
         },
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
         "body": "={{ JSON.stringify($json) }}",
-        "options": { "response": { "response": { "neverError": true } } }
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
       },
       "id": "board-submit-approval",
       "name": "Submit for Approval",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2060, 380]
+      "position": [
+        2060,
+        380
+      ]
     }
   ],
   "connections": {
     "Monday 8AM": {
-      "main": [[{ "node": "Authenticate", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Authenticate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Manual Trigger: Board Report": {
-      "main": [[{ "node": "Authenticate", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Authenticate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Authenticate": {
-      "main": [[{ "node": "Fetch Dashboard Stats", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Fetch Dashboard Stats",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Fetch Dashboard Stats": {
-      "main": [[{ "node": "Fetch Open Incidents", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Fetch Open Incidents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Fetch Open Incidents": {
-      "main": [[{ "node": "Aggregate Weekly Metrics", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Aggregate Weekly Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Aggregate Weekly Metrics": {
-      "main": [[{ "node": "Build Board Prompt", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Build Board Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Build Board Prompt": {
-      "main": [[{ "node": "Call OpenAI", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Call OpenAI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Call OpenAI": {
-      "main": [[{ "node": "Build Slack Board Report", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Build Slack Board Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Build Slack Board Report": {
-      "main": [[{ "node": "Build Approval Payload", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Build Approval Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Build Approval Payload": {
-      "main": [[{ "node": "Submit for Approval", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Submit for Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
-  "settings": { "executionOrder": "v1", "saveManualExecutions": true },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
   "staticData": null,
-  "tags": [{ "name": "cybersentinel" }, { "name": "board-report" }, { "name": "slack" }],
+  "tags": [
+    {
+      "name": "cybersentinel"
+    },
+    {
+      "name": "board-report"
+    },
+    {
+      "name": "slack"
+    }
+  ],
   "triggerCount": 1,
   "updatedAt": "2026-04-08T00:00:00.000Z",
-  "versionId": "05-weekly-board-v2"
+  "versionId": "05-weekly-board-v2",
+  "id": "wf05-weekly-board-report"
 }

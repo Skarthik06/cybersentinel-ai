@@ -3,13 +3,23 @@
   "nodes": [
     {
       "parameters": {
-        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 7 * * 1-5" }] }
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7 * * 1-5"
+            }
+          ]
+        }
       },
       "id": "schedule-trigger",
       "name": "Schedule: 7AM Mon–Fri",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1,
-      "position": [240, 300]
+      "position": [
+        240,
+        300
+      ]
     },
     {
       "parameters": {
@@ -22,7 +32,10 @@
       "name": "Manual Trigger: Daily Report",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 1,
-      "position": [240, 460],
+      "position": [
+        240,
+        460
+      ],
       "webhookId": "run-daily-report"
     },
     {
@@ -33,8 +46,14 @@
         "contentType": "form-urlencoded",
         "bodyParameters": {
           "parameters": [
-            { "name": "username", "value": "admin" },
-            { "name": "password", "value": "cybersentinel2025" }
+            {
+              "name": "username",
+              "value": "admin"
+            },
+            {
+              "name": "password",
+              "value": "cybersentinel2025"
+            }
           ]
         },
         "options": {}
@@ -43,14 +62,22 @@
       "name": "Authenticate API",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [460, 380]
+      "position": [
+        460,
+        380
+      ]
     },
     {
       "parameters": {
         "url": "=http://host.docker.internal:8080/api/v1/dashboard",
         "sendHeaders": true,
         "headerParameters": {
-          "parameters": [{ "name": "Authorization", "value": "=Bearer {{ $('Authenticate API').item.json.access_token }}" }]
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Authenticate API').item.json.access_token }}"
+            }
+          ]
         },
         "options": {}
       },
@@ -58,14 +85,22 @@
       "name": "Fetch Dashboard Stats",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [660, 380]
+      "position": [
+        660,
+        380
+      ]
     },
     {
       "parameters": {
         "url": "=http://host.docker.internal:8080/api/v1/alerts?severity=CRITICAL&hours=24&limit=10",
         "sendHeaders": true,
         "headerParameters": {
-          "parameters": [{ "name": "Authorization", "value": "=Bearer {{ $('Authenticate API').item.json.access_token }}" }]
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Authenticate API').item.json.access_token }}"
+            }
+          ]
         },
         "options": {}
       },
@@ -73,14 +108,22 @@
       "name": "Fetch Top Critical Alerts",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [860, 380]
+      "position": [
+        860,
+        380
+      ]
     },
     {
       "parameters": {
         "url": "=http://host.docker.internal:8080/api/v1/incidents?status=OPEN",
         "sendHeaders": true,
         "headerParameters": {
-          "parameters": [{ "name": "Authorization", "value": "=Bearer {{ $('Authenticate API').item.json.access_token }}" }]
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Authenticate API').item.json.access_token }}"
+            }
+          ]
         },
         "options": {}
       },
@@ -88,17 +131,23 @@
       "name": "Fetch Open Incidents",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1060, 380]
+      "position": [
+        1060,
+        380
+      ]
     },
     {
       "parameters": {
-        "jsCode": "const stats = $('Fetch Dashboard Stats').item.json;\nconst alertsRaw = $('Fetch Top Critical Alerts').item.json;\nconst incRaw = $('Fetch Open Incidents').item.json;\nconst alerts = Array.isArray(alertsRaw) ? alertsRaw : (alertsRaw.alerts || []);\nconst incidents = Array.isArray(incRaw) ? incRaw : (incRaw.incidents || []);\nconst dataStr = JSON.stringify({ stats, topAlerts: alerts.slice(0,3), openIncidents: incidents.slice(0,3) }, null, 2);\nconst prompt = 'You are a senior SOC analyst. Write a Daily SOC Intelligence Report under 400 words covering:\\n1. EXECUTIVE SUMMARY\\n2. KEY METRICS\\n3. TOP THREATS\\n4. MITRE TECHNIQUES\\n5. RECOMMENDED ACTIONS\\n\\nData:\\n' + dataStr;\nreturn [{ json: { prompt, stats } }];"
+        "jsCode": "const stats = $('Fetch Dashboard Stats').item.json;\nconst alertsRaw = $('Fetch Top Critical Alerts').item.json;\nconst incRaw = $('Fetch Open Incidents').item.json;\nconst alerts = Array.isArray(alertsRaw) ? alertsRaw : (alertsRaw.alerts || []);\nconst incidents = Array.isArray(incRaw) ? incRaw : (incRaw.incidents || []);\nconst dataStr = JSON.stringify({ stats, topAlerts: alerts.slice(0,3), openIncidents: incidents.slice(0,3) }, null, 2);\nconst today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });\nconst prompt = 'You are a senior SOC analyst. Write a Daily SOC Intelligence Report for ' + today + ' under 400 words covering:\\n1. EXECUTIVE SUMMARY\\n2. KEY METRICS\\n3. TOP THREATS\\n4. MITRE TECHNIQUES\\n5. RECOMMENDED ACTIONS\\n\\nDo NOT use placeholder text. Use the actual date: ' + today + '\\n\\nData:\\n' + dataStr;\nreturn [{ json: { prompt, stats } }];"
       },
       "id": "build-ai-prompt",
       "name": "Build AI Prompt",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1260, 380]
+      "position": [
+        1260,
+        380
+      ]
     },
     {
       "parameters": {
@@ -107,8 +156,14 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Authorization", "value": "=Bearer {{ $env.OPENAI_API_KEY }}" },
-            { "name": "Content-Type", "value": "application/json" }
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
           ]
         },
         "sendBody": true,
@@ -121,27 +176,36 @@
       "name": "Call OpenAI",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1460, 380]
+      "position": [
+        1460,
+        380
+      ]
     },
     {
       "parameters": {
-        "jsCode": "const reportText = ($json.choices && $json.choices[0]) ? $json.choices[0].message.content : 'Report generation failed \u2014 check OpenAI API key';\nconst stats = $('Build AI Prompt').item.json.stats;\nconst date = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });\nconst riskLevel = stats.critical_alerts_24h > 10 ? '\uD83D\uDD34 HIGH RISK' : stats.critical_alerts_24h > 3 ? '\uD83D\uDFE0 ELEVATED' : '\uD83D\uDFE2 NORMAL';\nconst metricLine = '*Alerts (24h):* ' + stats.total_alerts_24h + '  |  *Critical:* ' + stats.critical_alerts_24h + '  |  *Incidents:* ' + stats.active_incidents + '  |  *Blocked IPs:* ' + stats.blocked_ips + '  |  *Risk Score:* ' + (stats.risk_score * 100).toFixed(0) + '%';\nreturn [{ json: { channel: 'C0ANVSMJTH9', text: '\uD83D\uDCCA CyberSentinel Daily SOC Report \u2014 ' + date, blocks: [{ type: 'header', text: { type: 'plain_text', text: '\uD83D\uDCCA Daily SOC Report \u2014 ' + date } }, { type: 'section', text: { type: 'mrkdwn', text: '*Risk Level:* ' + riskLevel + '\\n' + metricLine } }, { type: 'divider' }, { type: 'section', text: { type: 'mrkdwn', text: reportText } }, { type: 'divider' }, { type: 'context', elements: [{ type: 'mrkdwn', text: 'Generated by CyberSentinel AI  |  ' + date }] }] } }];"
+        "jsCode": "const reportText = ($json.choices && $json.choices[0]) ? $json.choices[0].message.content : 'Report generation failed — check OpenAI API key';\nconst stats = $('Build AI Prompt').item.json.stats;\nconst date = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });\nconst riskLevel = stats.critical_alerts_24h > 10 ? '🔴 HIGH RISK' : stats.critical_alerts_24h > 3 ? '🟠 ELEVATED' : '🟢 NORMAL';\nconst metricLine = '*Alerts (24h):* ' + stats.total_alerts_24h + '  |  *Critical:* ' + stats.critical_alerts_24h + '  |  *Incidents:* ' + stats.active_incidents + '  |  *Blocked IPs:* ' + stats.blocked_ips + '  |  *Risk Score:* ' + (stats.risk_score * 100).toFixed(0) + '%';\nreturn [{ json: { channel: $env.SLACK_CHANNEL_ID || 'general', text: '📊 CyberSentinel Daily SOC Report — ' + date, blocks: [{ type: 'header', text: { type: 'plain_text', text: '📊 Daily SOC Report — ' + date } }, { type: 'section', text: { type: 'mrkdwn', text: '*Risk Level:* ' + riskLevel + '\\n' + metricLine } }, { type: 'divider' }, { type: 'section', text: { type: 'mrkdwn', text: reportText } }, { type: 'divider' }, { type: 'context', elements: [{ type: 'mrkdwn', text: 'Generated by CyberSentinel AI  |  ' + date }] }] } }];"
       },
       "id": "build-report",
       "name": "Build Slack Report",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1660, 380]
+      "position": [
+        1660,
+        380
+      ]
     },
     {
       "parameters": {
-        "jsCode": "const d = $input.first().json;\nconst reportId = 'daily-' + new Date().toISOString().slice(0,10) + '-' + Date.now().toString(36);\nreturn [{ json: { report_id: reportId, workflow: 'daily_soc', title: 'Daily SOC Report \u2014 ' + new Date().toLocaleDateString('en-US',{weekday:'long',month:'short',day:'numeric'}), slack_payload: d } }];"
+        "jsCode": "const d = $input.first().json;\nconst reportId = 'daily-' + new Date().toISOString().slice(0,10) + '-' + Date.now().toString(36);\nreturn [{ json: { report_id: reportId, workflow: 'daily_soc', title: 'Daily SOC Report — ' + new Date().toLocaleDateString('en-US',{weekday:'long',month:'short',day:'numeric'}), slack_payload: d } }];"
       },
       "id": "build-approval-02",
       "name": "Build Approval Payload",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1860, 380]
+      "position": [
+        1860,
+        380
+      ]
     },
     {
       "parameters": {
@@ -150,55 +214,165 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Content-Type", "value": "application/json" }
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
           ]
         },
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
         "body": "={{ JSON.stringify($json) }}",
-        "options": { "response": { "response": { "neverError": true } } }
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
       },
       "id": "submit-approval-02",
       "name": "Submit for Approval",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2060, 380]
+      "position": [
+        2060,
+        380
+      ]
     }
   ],
   "connections": {
-    "Schedule: 7AM Mon\u2013Fri": {
-      "main": [[{ "node": "Authenticate API", "type": "main", "index": 0 }]]
+    "Schedule: 7AM Mon–Fri": {
+      "main": [
+        [
+          {
+            "node": "Authenticate API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Manual Trigger: Daily Report": {
-      "main": [[{ "node": "Authenticate API", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Authenticate API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Authenticate API": {
-      "main": [[{ "node": "Fetch Dashboard Stats", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Fetch Dashboard Stats",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Fetch Dashboard Stats": {
-      "main": [[{ "node": "Fetch Top Critical Alerts", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Fetch Top Critical Alerts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Fetch Top Critical Alerts": {
-      "main": [[{ "node": "Fetch Open Incidents", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Fetch Open Incidents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Fetch Open Incidents": {
-      "main": [[{ "node": "Build AI Prompt", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Build AI Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Build AI Prompt": {
-      "main": [[{ "node": "Call OpenAI", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Call OpenAI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Call OpenAI": {
-      "main": [[{ "node": "Build Slack Report", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Build Slack Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Build Slack Report": {
-      "main": [[{ "node": "Build Approval Payload", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Build Approval Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Build Approval Payload": {
-      "main": [[{ "node": "Submit for Approval", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Submit for Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": false,
-  "settings": { "executionOrder": "v1", "saveManualExecutions": true, "callerPolicy": "workflowsFromSameOwner" },
-  "tags": [{"name": "cybersentinel"}, {"name": "report"}, {"name": "daily"}, {"name": "production"}]
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": [
+    {
+      "name": "cybersentinel"
+    },
+    {
+      "name": "report"
+    },
+    {
+      "name": "daily"
+    },
+    {
+      "name": "production"
+    }
+  ],
+  "id": "wf02-daily-soc-report"
 }

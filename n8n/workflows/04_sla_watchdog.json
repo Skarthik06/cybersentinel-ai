@@ -4,14 +4,22 @@
     {
       "parameters": {
         "rule": {
-          "interval": [{ "field": "minutes", "minutesInterval": 15 }]
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
         }
       },
       "id": "sla-trigger",
       "name": "Every 15 Minutes",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.1,
-      "position": [240, 200]
+      "position": [
+        240,
+        200
+      ]
     },
     {
       "parameters": {
@@ -24,7 +32,10 @@
       "name": "Manual Trigger: SLA Check",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 1,
-      "position": [240, 400],
+      "position": [
+        240,
+        400
+      ],
       "webhookId": "run-sla-check"
     },
     {
@@ -33,13 +44,27 @@
         "method": "POST",
         "sendBody": true,
         "contentType": "form-urlencoded",
-        "body": "=username=admin&password=cybersentinel2025"
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "username",
+              "value": "admin"
+            },
+            {
+              "name": "password",
+              "value": "cybersentinel2025"
+            }
+          ]
+        }
       },
       "id": "sla-auth",
       "name": "Authenticate",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [460, 300]
+      "position": [
+        460,
+        300
+      ]
     },
     {
       "parameters": {
@@ -48,7 +73,10 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Authorization", "value": "=Bearer {{ $node['Authenticate'].json.access_token }}" }
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $node['Authenticate'].json.access_token }}"
+            }
           ]
         }
       },
@@ -56,7 +84,10 @@
       "name": "Fetch Open Incidents",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [680, 300]
+      "position": [
+        680,
+        300
+      ]
     },
     {
       "parameters": {
@@ -66,17 +97,25 @@
       "name": "Check SLA Thresholds",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [900, 300]
+      "position": [
+        900,
+        300
+      ]
     },
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": false },
+          "options": {
+            "caseSensitive": false
+          },
           "conditions": [
             {
               "leftValue": "={{ $json.breached.length + $json.warning.length }}",
               "rightValue": 0,
-              "operator": { "type": "number", "operation": "gt" }
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
             }
           ]
         }
@@ -85,7 +124,10 @@
       "name": "Any SLA Issues?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [1120, 300]
+      "position": [
+        1120,
+        300
+      ]
     },
     {
       "parameters": {
@@ -95,31 +137,23 @@
       "name": "Build Slack SLA Alert",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1340, 200]
+      "position": [
+        1340,
+        200
+      ]
     },
     {
       "parameters": {
-        "url": "https://slack.com/api/chat.postMessage",
-        "method": "POST",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            { "name": "Authorization", "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}" },
-            { "name": "Content-Type", "value": "application/json; charset=utf-8" }
-          ]
-        },
-        "sendBody": true,
-        "contentType": "json",
-        "body": "={{ JSON.stringify($json) }}"
+        "jsCode": "const d = $input.first().json;\nconst slaData = $('Check SLA Thresholds').item.json;\nconst reportId = 'sla-' + Date.now().toString(36);\nreturn [{ json: { report_id: reportId, workflow: 'sla_watchdog', title: 'SLA Alert — ' + (slaData.breached||[]).length + ' breached, ' + (slaData.warning||[]).length + ' warning (' + new Date().toLocaleTimeString() + ')', slack_payload: d } }];"
       },
       "id": "sla-build-approval",
       "name": "Build Approval Payload",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1560, 200],
-      "parameters": {
-        "jsCode": "const d = $input.first().json;\nconst reportId = 'sla-' + Date.now().toString(36);\nreturn [{ json: { report_id: reportId, workflow: 'sla_watchdog', title: 'SLA Alert — ' + d.breached.length + ' breached, ' + d.warning.length + ' warning (' + new Date().toLocaleTimeString() + ')', slack_payload: d } }];"
-      }
+      "position": [
+        1560,
+        200
+      ]
     },
     {
       "parameters": {
@@ -127,53 +161,143 @@
         "method": "POST",
         "sendHeaders": true,
         "headerParameters": {
-          "parameters": [{ "name": "Content-Type", "value": "application/json" }]
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
         },
         "sendBody": true,
-        "contentType": "json",
+        "contentType": "raw",
+        "rawContentType": "application/json",
         "body": "={{ JSON.stringify($json) }}",
-        "options": { "response": { "response": { "neverError": true } } }
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
       },
       "id": "sla-submit-approval",
       "name": "Submit for Approval",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1780, 200]
+      "position": [
+        1780,
+        200
+      ]
     }
   ],
   "connections": {
     "Every 15 Minutes": {
-      "main": [[{ "node": "Authenticate", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Authenticate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Manual Trigger: SLA Check": {
-      "main": [[{ "node": "Authenticate", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Authenticate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Authenticate": {
-      "main": [[{ "node": "Fetch Open Incidents", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Fetch Open Incidents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Fetch Open Incidents": {
-      "main": [[{ "node": "Check SLA Thresholds", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Check SLA Thresholds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Check SLA Thresholds": {
-      "main": [[{ "node": "Any SLA Issues?", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Any SLA Issues?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Any SLA Issues?": {
       "main": [
-        [{ "node": "Build Slack SLA Alert", "type": "main", "index": 0 }],
+        [
+          {
+            "node": "Build Slack SLA Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
         []
       ]
     },
     "Build Slack SLA Alert": {
-      "main": [[{ "node": "Build Approval Payload", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Build Approval Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Build Approval Payload": {
-      "main": [[{ "node": "Submit for Approval", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Submit for Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
-  "settings": { "executionOrder": "v1" },
+  "settings": {
+    "executionOrder": "v1"
+  },
   "staticData": null,
-  "tags": [{ "name": "cybersentinel" }, { "name": "sla" }, { "name": "slack" }],
+  "tags": [
+    {
+      "name": "cybersentinel"
+    },
+    {
+      "name": "sla"
+    },
+    {
+      "name": "slack"
+    }
+  ],
   "triggerCount": 1,
   "updatedAt": "2026-04-08T00:00:00.000Z",
-  "versionId": "04-sla-watchdog-v1"
+  "versionId": "04-sla-watchdog-v1",
+  "id": "wf04-sla-watchdog"
 }

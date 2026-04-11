@@ -1,6 +1,6 @@
 # CyberSentinel AI — Master Project Document
 
-**Version 1.2.1 | 2026 | Comprehensive Technical Reference with Visual Diagrams**
+**Version 1.2.2 | 2026 | Comprehensive Technical Reference with Visual Diagrams**
 
 > This document is the single source of truth for the entire CyberSentinel AI platform. Every diagram, table, and explanation is derived directly from the live source code. Mermaid diagrams render natively on GitHub, VS Code (Mermaid Preview extension), Notion, Obsidian, and GitBook.
 
@@ -31,6 +31,10 @@
 21. [Observability Stack](#21-observability-stack)
 22. [Environment Configuration Reference](#22-environment-configuration-reference)
 23. [Deployment Guide](#23-deployment-guide)
+24. [Appendix A — File Structure Reference](#appendix-a--file-structure-reference)
+25. [Appendix B — MITRE ATT&CK Coverage](#appendix-b--mitre-attck-coverage)
+26. [Appendix C — v1.2.2 Operational Changes](#appendix-c--v122-operational-changes)
+27. [Appendix D — Document Index](#appendix-d--document-index)
 
 ---
 
@@ -598,7 +602,7 @@ graph TB
         end
 
         subgraph BP_COL["behavior_profiles"]
-            BP_P["Populated by: RLM engine only\nSchedule: Per hour per IP\n⚠️ DPI pipeline ONLY\nTTL: 30 days"]
+            BP_P["Populated by: RLM engine only\nSchedule: Per hour per IP\nBoth DPI and Simulator (v1.2+)\nTTL: 30 days"]
             BP_D["Documents: IP behavioral\nprofile text\nID: profile_{ip}_{YYYYMMDDH}"]
         end
     end
@@ -1177,7 +1181,7 @@ graph TB
             H2["Row 1 metric cards:\nIP Address\nAnomaly Score\nAvg Bytes/Min\nAvg Entropy\nObservations\nBLOCKED (YES/NO)"]
             H3["Row 2 cards:\nBLOCK EVENTS (count)\nLINKED INCIDENTS (count)\nPROFILE NOTE (profile_text)"]
             H4["RECENT ALERTS section\nSevBadge + type + MITRE + timestamp"]
-            H5["⚠️ Simulator IPs show\n0 for behavioral metrics\n(DPI pipeline not running)"]
+            H5["✅ v1.2: Simulator IPs\nhave real EMA metrics\n(full DPI pipeline)"]
         end
 
         subgraph T5["Tab 5: THREAT INTEL"]
@@ -1535,7 +1539,7 @@ cybersentinel-ai/
 │   │   ├── embedder.py                # ChromaDB + embedding governance
 │   │   └── sources.py                 # Scraper source configs
 │   ├── simulation/
-│   │   └── traffic_simulator.py       # 12-scenario threat simulator
+│   │   └── traffic_simulator.py       # 17-scenario threat simulator (12 MITRE + 5 novel)
 │   └── core/
 │       ├── config.py                  # All config from env vars
 │       ├── constants.py               # MITRE IDs, thresholds
@@ -1555,10 +1559,26 @@ cybersentinel-ai/
 │   │   └── 05_weekly_board_report.json
 │   └── bridge/kafka_bridge.py         # Kafka → n8n webhook bridge
 │
-├── scripts/db/init.sql                # PostgreSQL schema + seed data
+├── scripts/
+│   ├── db/init.sql                    # PostgreSQL schema + seed data
+│   ├── setup/install.sh               # First-time Docker setup
+│   ├── setup/add_n8n.sh               # Add n8n to running stack
+│   ├── setup/reset.sh                 # Full data reset
+│   ├── activate_n8n_workflows.py      # Repair n8n SQLite activation state
+│   └── start_n8n.ps1                  # Fresh N8N setup with all env vars
+│
 ├── configs/prometheus/                # Prometheus config + alert rules
 ├── configs/grafana/                   # Grafana datasource config
 └── docs/                             # All documentation (this folder)
+    ├── MASTER.md                      # This file — full reference with diagrams
+    ├── PROJECT.md                     # Project overview
+    ├── ARCHITECTURE.md                # Deep-dive design document
+    ├── CHANGELOG.md                   # Version history
+    ├── WORKFLOWS.md                   # n8n SOAR specs
+    ├── N8N_OPERATIONS.md              # n8n troubleshooting and ops
+    ├── ABBREVIATIONS.md               # Cybersecurity glossary
+    ├── TWR_PRESENTATION.md            # Panel presentation report
+    └── ...                            # PRD, TRD, API_REFERENCE, etc.
 ```
 
 ---
@@ -1585,5 +1605,69 @@ cybersentinel-ai/
 
 ---
 
-*CyberSentinel AI — Master Project Document — v1.1 — 2026*
+---
+
+## Appendix C — v1.2.2 Operational Changes
+
+All changes below were applied on 2026-04-11. See `docs/CHANGELOG.md` for the full entry.
+
+### Infrastructure Fixes
+
+| Component | Fix | File Changed |
+|-----------|-----|-------------|
+| Grafana | Removed `GF_INSTALL_PLUGINS` — caused DNS failure to grafana.com on container init, exit code 1 | `docker-compose.yml` |
+| N8N network | Container must be on `cybersentinel-ai_cybersentinel-net` (not default bridge) to reach API | `scripts/start_n8n.ps1` |
+| N8N env | `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` required — n8n 2.15+ blocks `$env.*` by default | `scripts/start_n8n.ps1` |
+
+### N8N Workflow Fixes
+
+| Workflow | Fix | Root Cause |
+|----------|-----|-----------|
+| WF04 SLA Auth | `bodyParameters` instead of raw `body` string | n8n 4.2 HTTP Request no longer accepts raw form strings |
+| WF04 Approval Payload | Read counts from `$('Check SLA Thresholds').item.json` | Code read `.breached` from Slack payload object (wrong node) |
+
+### API Gateway Fixes
+
+| File | Fix | Root Cause |
+|------|-----|-----------|
+| `src/api/gateway.py` | Timeout raised from 10s → 90s on workflow trigger proxy | OpenAI calls take 18–27s — 10s caused timeout |
+| `src/api/gateway.py` | Added `httpx.TimeoutException` handler returning `{"status": "triggered", "n8n_status": 202}` | Timeout was unhandled, propagated as 500 to frontend |
+
+### New Scripts and Documentation
+
+| Item | Purpose |
+|------|---------|
+| `scripts/activate_n8n_workflows.py` | Repair n8n SQLite activation state — fixes inactive/unpublished workflows after any import |
+| `scripts/start_n8n.ps1` | Full N8N fresh-start with all required env vars and automatic workflow activation |
+| `docs/N8N_OPERATIONS.md` | Complete operations guide — when workflows break, how to fix, full troubleshooting |
+| `docs/ABBREVIATIONS.md` | All cybersecurity and project-specific abbreviations (8 sections) |
+| `docs/TWR_PRESENTATION.md` | 18-section technical work report for academic panel presentation |
+
+---
+
+## Appendix D — Document Index
+
+| Document | Version | Purpose |
+|----------|---------|---------|
+| `PROJECT.md` | v1.2.2 | Master project overview, features, quick start |
+| `MASTER.md` | v1.2.2 | This file — architecture, all diagrams, full reference |
+| `ARCHITECTURE.md` | v1.2.2 | Deep-dive design principles, layers, failure modes |
+| `CHANGELOG.md` | v1.2.2 | Full version history with architectural decisions |
+| `WORKFLOWS.md` | v1.2.2 | n8n SOAR workflow specs, node sequences, credential reference |
+| `N8N_OPERATIONS.md` | v1.0 | n8n troubleshooting, activation scripts, ops guide |
+| `ABBREVIATIONS.md` | v1.0 | Glossary — all cybersecurity and project abbreviations |
+| `TWR_PRESENTATION.md` | v1.0 | Technical work report for panel presentation |
+| `PRD.md` | v1.0 | Product Requirements Document |
+| `TRD.md` | v1.0 | Technical Requirements Document |
+| `API_REFERENCE.md` | v1.2 | All REST API endpoints with request/response schemas |
+| `PIPELINES.md` | v1.2 | DPI vs simulator pipeline comparison |
+| `RAG_DESIGN.md` | v1.0 | RAG pipeline and ChromaDB governance |
+| `LIVE_DPI_SETUP.md` | v1.0 | Npcap installation and live DPI setup guide |
+| `THREAT_SIGNATURES.md` | v1.0 | All 19 RLM threat signatures — MITRE mapping, behavioral fingerprints, scoring |
+| `RESOURCES.md` | v1.0 | 25 research papers across 7 domains |
+| `CONTRIBUTING.md` | v1.0 | Developer setup and contribution guide |
+
+---
+
+*CyberSentinel AI — Master Project Document — v1.2.2 — 2026*
 *Generated from live source code. All diagrams render natively on GitHub.*

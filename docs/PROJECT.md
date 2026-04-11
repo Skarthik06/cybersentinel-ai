@@ -194,6 +194,10 @@ cd frontend && npm install && npm run dev
 | [`RAG_DESIGN.md`](RAG_DESIGN.md) | RAG pipeline design + governance |
 | [`API_REFERENCE.md`](API_REFERENCE.md) | All REST API endpoints including block recommendations |
 | [`WORKFLOWS.md`](WORKFLOWS.md) | n8n SOAR workflow specs |
+| [`N8N_OPERATIONS.md`](N8N_OPERATIONS.md) | n8n troubleshooting, activation script, fresh-start procedure |
+| [`ABBREVIATIONS.md`](ABBREVIATIONS.md) | Complete glossary — all cybersecurity and project abbreviations |
+| [`TWR_PRESENTATION.md`](TWR_PRESENTATION.md) | 18-section technical work report for panel presentation |
+| [`THREAT_SIGNATURES.md`](THREAT_SIGNATURES.md) | All 19 RLM threat signatures — MITRE mapping, behavioral fingerprints, scoring |
 | [`RESOURCES.md`](RESOURCES.md) | 25 research papers across 7 domains |
 | [`CHANGELOG.md`](CHANGELOG.md) | Version history + architectural decisions |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Dev setup + contribution guide |
@@ -231,4 +235,4 @@ This project makes **three novel contributions** to the academic literature:
 
 ---
 
-*CyberSentinel AI v1.2 — Capstone Project 2025/2026*
+*CyberSentinel AI v1.2.2 — Capstone Project 2025/2026*

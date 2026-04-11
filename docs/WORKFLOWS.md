@@ -7,6 +7,27 @@ All workflow JSON files are in `n8n/workflows/` — import directly into n8n.
 
 ---
 
+## Critical: N8N Environment Setup
+
+Before workflows will run, the N8N container must be started with these environment variables:
+
+| Variable | Required Value | Why |
+|----------|---------------|-----|
+| `N8N_BLOCK_ENV_ACCESS_IN_NODE` | `false` | n8n 2.15+ blocks `$env.OPENAI_API_KEY` etc. by default. Without this, all LLM calls silently fail. |
+| `OPENAI_API_KEY` | Your key | Referenced as `$env.OPENAI_API_KEY` in WF02, WF03, WF05 |
+| `SLACK_BOT_TOKEN` | Your token | Referenced as `$env.SLACK_BOT_TOKEN` in WF02, WF03, WF04, WF05 |
+| `SLACK_CHANNEL_ID` | Your channel | Referenced as `$env.SLACK_CHANNEL_ID` |
+
+Use `scripts/start_n8n.ps1` to start N8N with all required vars set from `.env`. See `docs/N8N_OPERATIONS.md` for full details.
+
+**After any import or restart where workflows aren't activating:**
+```powershell
+python scripts/activate_n8n_workflows.py
+docker restart N8N
+```
+
+---
+
 ## How n8n Fits the Architecture
 
 n8n sits at Layer 3 (Orchestration) and receives events via the Kafka Bridge — a Python service that translates Kafka topic messages into HTTP webhook calls.
@@ -347,4 +368,32 @@ curl -X POST http://localhost:5678/webhook/critical-cve \
 
 ---
 
-*SOAR Workflows — CyberSentinel AI v1.2.1 — 2025/2026*
+## N8N Activation Reference
+
+After importing workflows or after a fresh N8N setup, workflows start as **inactive drafts**. n8n requires three things in its SQLite database for a workflow to actually run:
+
+1. `workflow_entity.active = 1`
+2. `workflow_entity.activeVersionId` pointing to a version UUID
+3. A row in `workflow_published_version` for each workflow
+4. Correct nodes stored in `workflow_history` at that version UUID (n8n reads execution code from here, not from `workflow_entity.nodes`)
+
+The script `scripts/activate_n8n_workflows.py` handles all of this automatically.
+
+**Symptoms of inactive workflows:**
+- `{"code":404,"message":"The requested webhook is not registered"}` from any webhook endpoint
+- n8n logs: `Processed 5 draft workflows, 0 published workflows`
+- Frontend Automation tab shows FAILED on all triggers
+
+**Fix:**
+```powershell
+python scripts/activate_n8n_workflows.py
+docker restart N8N
+# Then verify: docker logs --tail 5 N8N
+# Should see: "Activated workflow ..." for all 5
+```
+
+See `docs/N8N_OPERATIONS.md` for a complete troubleshooting guide.
+
+---
+
+*SOAR Workflows — CyberSentinel AI v1.2.2 — 2025/2026*

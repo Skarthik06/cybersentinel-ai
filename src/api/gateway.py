@@ -921,9 +921,12 @@ async def trigger_workflow(workflow_id: str, user: dict = Depends(get_current_us
         raise HTTPException(status_code=404, detail=f"Unknown workflow: {workflow_id}. Valid: {list(WORKFLOW_WEBHOOKS)}")
     url = f"{N8N_URL}/webhook/{path}"
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=90) as client:
             resp = await client.post(url, json={"triggered_by": user.get("username"), "timestamp": datetime.utcnow().isoformat()})
         return {"workflow": workflow_id, "status": "triggered", "n8n_status": resp.status_code}
+    except httpx.TimeoutException:
+        # Workflow started but response took >90s — treat as triggered (still running in n8n)
+        return {"workflow": workflow_id, "status": "triggered", "n8n_status": 202}
     except httpx.ConnectError:
         raise HTTPException(status_code=503, detail=f"n8n not reachable at {N8N_URL}. Check N8N_URL in .env")
 

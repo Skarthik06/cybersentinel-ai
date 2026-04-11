@@ -5,6 +5,152 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.2.2] — 2026-04-11 — Infrastructure Fixes + N8N Automation + Operations Documentation
+
+### Fixed — Grafana Container: Exit Code 1 on Startup
+
+**Problem:** Grafana exited immediately on startup with code 1. Root cause: `GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-worldmap-panel` in `docker-compose.yml` caused Grafana to attempt a DNS lookup to `grafana.com` during container init. Inside the Docker network, this lookup fails — Grafana errors and exits.
+
+**Fix:** Removed `GF_INSTALL_PLUGINS` line from `docker-compose.yml`. Grafana starts cleanly without external plugin downloads. The clock and worldmap panels are not used by the project dashboards.
+
+---
+
+### Fixed — N8N Not Reachable from API Container
+
+**Problem:** The `N8N` container was started with `docker run` outside of `docker compose`, so it was placed on the default Docker bridge network, not on `cybersentinel-ai_cybersentinel-net`. The API container (inside the compose network) could not reach `host.docker.internal:5678`.
+
+**Fix:** Reconnect or recreate the N8N container on the correct network:
+```powershell
+docker network connect cybersentinel-ai_cybersentinel-net N8N
+```
+
+The correct network name is `cybersentinel-ai_cybersentinel-net` (Docker Compose prefixes the project folder name). This is now handled automatically by `scripts/start_n8n.ps1`.
+
+---
+
+### Fixed — N8N Workflow Activation: Inactive After Import
+
+**Problem:** After importing workflow JSON files via `n8n import:workflow`, all 5 workflows were left in a broken state:
+- `active = 0` in `workflow_entity` (n8n does not activate on import)
+- `activeVersionId = NULL` (no published version pointer)
+- No rows in `workflow_published_version` (n8n logs: "0 published workflows")
+- n8n reads execution nodes from `workflow_history` using `publishedVersionId` — not from `workflow_entity.nodes`. Updating `workflow_entity` alone has no effect.
+
+Result: All webhook endpoints returned 404, scheduled workflows never ran, and the frontend automation triggers returned FAILED.
+
+**Fix:** New script `scripts/activate_n8n_workflows.py` automatically detects and repairs all three conditions by direct SQLite manipulation:
+1. Sets `active = 1` for each workflow
+2. Generates and sets `activeVersionId` UUID
+3. Inserts row in `workflow_published_version`
+4. Inserts correct nodes into `workflow_history` from the live JSON files
+
+Run after any import or when workflows stop responding:
+```powershell
+python scripts/activate_n8n_workflows.py
+docker restart N8N
+```
+
+---
+
+### Fixed — N8N Env Vars Blocked in Workflow Nodes
+
+**Problem:** n8n 2.15+ introduced `N8N_BLOCK_ENV_ACCESS_IN_NODE=true` as the default. All workflow nodes that referenced `$env.OPENAI_API_KEY` and `$env.SLACK_BOT_TOKEN` silently failed — the variables were blocked by the sandbox. This caused all OpenAI LLM calls in WF02/03/05 to fail without an obvious error message.
+
+**Fix:** Recreate the N8N container with `N8N_BLOCK_ENV_ACCESS_IN_NODE=false`. This is now set in `scripts/start_n8n.ps1` automatically.
+
+---
+
+### Fixed — SLA Watchdog (WF04): Auth Node 422 Error
+
+**Problem:** The Authenticate API node used `"body": "=username=admin&password=cybersentinel2025"` (a raw URL-encoded string) with `contentType: form`. n8n 2.15 HTTP Request node (typeVersion 4.2) no longer accepts a raw string for form bodies — it expects structured `bodyParameters`.
+
+**Fix:** Changed auth node to use `bodyParameters`:
+```json
+"bodyParameters": {
+  "parameters": [
+    {"name": "username", "value": "admin"},
+    {"name": "password", "value": "cybersentinel2025"}
+  ]
+}
+```
+
+---
+
+### Fixed — SLA Watchdog (WF04): Build Approval Payload Crash
+
+**Problem:** The Build Approval Payload code node tried to read `d.breached.length` where `d` was the Slack payload object (which has no `.breached` field). This caused the step to produce "0 breached, 0 warning" in every report title.
+
+**Fix:** Changed to read SLA counts from `$('Check SLA Thresholds').item.json` instead:
+```js
+const slaData = $('Check SLA Thresholds').item.json;
+// Use slaData.breached and slaData.warning for accurate counts
+```
+
+---
+
+### Fixed — API Gateway: Workflow Triggers Returned 500 / FAILED
+
+**Problem:** The trigger endpoint in `src/api/gateway.py` used `httpx.AsyncClient(timeout=10)` when proxying requests to n8n. OpenAI API calls inside WF02 and WF05 take 18–27 seconds — well beyond the 10-second timeout. Additionally, the exception handler only caught `httpx.ConnectError`, so `TimeoutException` propagated as an unhandled 500.
+
+**Fix:**
+```python
+# Before
+async with httpx.AsyncClient(timeout=10) as client:
+    ...
+except httpx.ConnectError:
+    raise HTTPException(status_code=503, ...)
+
+# After
+async with httpx.AsyncClient(timeout=90) as client:
+    ...
+except httpx.TimeoutException:
+    return {"workflow": workflow_id, "status": "triggered", "n8n_status": 202}
+except httpx.ConnectError:
+    raise HTTPException(status_code=503, ...)
+```
+
+Timeout raised to 90 seconds. `TimeoutException` now returns a successful 200 response (the workflow is running; it just hasn't returned yet). Frontend no longer shows FAILED on long-running workflows.
+
+---
+
+### Added — N8N Workflow Activation Script (`scripts/activate_n8n_workflows.py`)
+
+Fully automated n8n workflow activator. Reads live workflow JSON from `n8n/workflows/`, directly manipulates the SQLite database at `D:/N8N/database.sqlite`, and ensures all three activation conditions are correct. Features:
+- `--dry-run` flag to preview changes without touching the DB
+- `--db` flag for custom SQLite path
+- `--workflows-dir` flag for custom workflow directory
+- `--wait` flag for use in startup scripts (adds delay before connecting)
+- All output uses ASCII-safe characters (Windows cp1252 compatible)
+
+---
+
+### Added — N8N Fresh-Start Script (`scripts/start_n8n.ps1`)
+
+PowerShell script for full N8N setup from scratch. Reads credentials from `.env`, removes old container, starts a new container with all required env vars (including `N8N_BLOCK_ENV_ACCESS_IN_NODE=false`), waits for initialization, runs the activation script, and restarts N8N. Handles first-time setup and full resets with a single command.
+
+---
+
+### Added — N8N Operations Guide (`docs/N8N_OPERATIONS.md`)
+
+Comprehensive operations reference covering:
+- Why workflows break after restart (and when they don't)
+- SQLite database structure n8n requires
+- Fix script usage and sample output
+- Full fresh-start procedure (automated and manual)
+- N8N container reference (all required env vars)
+- Troubleshooting all known error patterns
+- Webhook reference table and full request chain
+
+### Added — Abbreviations Reference (`docs/ABBREVIATIONS.md`)
+
+Complete glossary of all cybersecurity and project-specific abbreviations across 8 sections: SOC/SOAR/SIEM terms, threat intelligence standards, MITRE ATT&CK techniques, network/protocol terms, AI/ML terms, platform/infrastructure terms, CyberSentinel-specific terms, and a metrics reference table.
+
+### Added — TWR Presentation Document (`docs/TWR_PRESENTATION.md`)
+
+Full 18-section technical work report document prepared for the academic panel presentation. Covers: executive summary, problem statement, objectives, system architecture, all core technical components, novel contributions with comparison tables, end-to-end data flow timeline, SOAR automation, SOC dashboard, threat detection matrix, security architecture, performance/cost analysis, technology stack, deployment architecture, testing, limitations, research positioning, and conclusion.
+
+---
+
 ## [1.2.1] — 2026-04-08 — n8n Workflow Fixes + SLA + Board Report
 
 ### Fixed — n8n Code Nodes: HTTP Calls Blocked by JS Task Runner Sandbox

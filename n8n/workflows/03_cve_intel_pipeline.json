@@ -1,5 +1,5 @@
 {
-  "name": "CyberSentinel \u2014 CVE Intel Pipeline",
+  "name": "CyberSentinel — CVE Intel Pipeline",
   "nodes": [
     {
       "parameters": {
@@ -12,28 +12,37 @@
       "name": "Webhook: CVE Alert Trigger",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 1,
-      "position": [240, 300],
+      "position": [
+        240,
+        300
+      ],
       "webhookId": "critical-cve"
     },
     {
       "parameters": {
-        "jsCode": "const cve = $input.first().json;\nconst cveid = cve.cve_id || cve.id || 'CVE-UNKNOWN';\nconst cvss = parseFloat(cve.cvss_score || cve.score || 0);\nconst description = cve.description || cve.summary || 'No description available';\nconst published = cve.published_date || cve.published || new Date().toISOString();\nconst affectedProducts = cve.affected_products || cve.products || [];\nconst activeExploit = cve.actively_exploited === true || cve.exploit_available === true;\nconst severity = cvss >= 9.0 ? 'CRITICAL' : cvss >= 7.0 ? 'HIGH' : cvss >= 4.0 ? 'MEDIUM' : 'LOW';\nconst emojiMap = { CRITICAL: '\ud83d\udea8', HIGH: '\ud83d\udd34', MEDIUM: '\ud83d\udfe0', LOW: '\ud83d\udfe1' };\nreturn [{ json: { cveid, cvss, severity, description, published, affectedProducts, activeExploit, emoji: emojiMap[severity] || '\ud83d\udea8', humanTime: new Date(published).toUTCString() } }];"
+        "jsCode": "const cve = $input.first().json;\nconst cveid = cve.cve_id || cve.id || 'CVE-UNKNOWN';\nconst cvss = parseFloat(cve.cvss_score || cve.score || 0);\nconst description = cve.description || cve.summary || 'No description available';\nconst published = cve.published_date || cve.published || new Date().toISOString();\nconst affectedProducts = cve.affected_products || cve.products || [];\nconst activeExploit = cve.actively_exploited === true || cve.exploit_available === true;\nconst severity = cvss >= 9.0 ? 'CRITICAL' : cvss >= 7.0 ? 'HIGH' : cvss >= 4.0 ? 'MEDIUM' : 'LOW';\nconst emojiMap = { CRITICAL: '🚨', HIGH: '🔴', MEDIUM: '🟠', LOW: '🟡' };\nreturn [{ json: { cveid, cvss, severity, description, published, affectedProducts, activeExploit, emoji: emojiMap[severity] || '🚨', humanTime: new Date(published).toUTCString() } }];"
       },
       "id": "parse-cve",
       "name": "Parse CVE Data",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [460, 300]
+      "position": [
+        460,
+        300
+      ]
     },
     {
       "parameters": {
-        "jsCode": "const cve = $input.first().json;\nconst prompt = 'You are a vulnerability intelligence analyst. Analyze this CVE and give a concise security advisory.\\n\\nCVE ID: ' + cve.cveid + '\\nCVSS Score: ' + cve.cvss + ' (' + cve.severity + ')\\nPublished: ' + cve.humanTime + '\\nActively Exploited: ' + (cve.activeExploit ? 'YES \u26a0\ufe0f' : 'No') + '\\nAffected Products: ' + JSON.stringify(cve.affectedProducts) + '\\nDescription: ' + cve.description + '\\n\\nProvide:\\n1. IMPACT SUMMARY (1-2 sentences: what can an attacker do?)\\n2. AFFECTED SYSTEMS (who is at risk?)\\n3. PATCH ACTION (specific version to upgrade to, or mitigation if no patch)\\n4. URGENCY (patch now / patch this week / monitor / low priority)\\n\\nBe specific and under 200 words.';\nreturn [{ json: { cve: cve, prompt: prompt } }];"
+        "jsCode": "const cve = $input.first().json;\nconst prompt = 'You are a vulnerability intelligence analyst. Analyze this CVE and give a concise security advisory.\\n\\nCVE ID: ' + cve.cveid + '\\nCVSS Score: ' + cve.cvss + ' (' + cve.severity + ')\\nPublished: ' + cve.humanTime + '\\nActively Exploited: ' + (cve.activeExploit ? 'YES ⚠️' : 'No') + '\\nAffected Products: ' + JSON.stringify(cve.affectedProducts) + '\\nDescription: ' + cve.description + '\\n\\nProvide:\\n1. IMPACT SUMMARY (1-2 sentences: what can an attacker do?)\\n2. AFFECTED SYSTEMS (who is at risk?)\\n3. PATCH ACTION (specific version to upgrade to, or mitigation if no patch)\\n4. URGENCY (patch now / patch this week / monitor / low priority)\\n\\nBe specific and under 200 words.';\nreturn [{ json: { cve: cve, prompt: prompt } }];"
       },
       "id": "build-cve-prompt",
       "name": "Build CVE Prompt",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [680, 300]
+      "position": [
+        680,
+        300
+      ]
     },
     {
       "parameters": {
@@ -42,8 +51,14 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Authorization", "value": "=Bearer {{ $env.OPENAI_API_KEY }}" },
-            { "name": "Content-Type", "value": "application/json" }
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
           ]
         },
         "sendBody": true,
@@ -56,17 +71,23 @@
       "name": "Call OpenAI",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [900, 300]
+      "position": [
+        900,
+        300
+      ]
     },
     {
       "parameters": {
-        "jsCode": "const analysisText = ($json.choices && $json.choices[0]) ? $json.choices[0].message.content : 'Analysis unavailable \u2014 check OpenAI API key';\nconst d = $('Build CVE Prompt').item.json.cve;\nconst exploitBadge = d.activeExploit ? '\ud83d\udea8 *ACTIVELY EXPLOITED*' : '';\nconst products = Array.isArray(d.affectedProducts) && d.affectedProducts.length > 0 ? d.affectedProducts.slice(0,3).join(', ') : 'See description';\nreturn [{ json: {\n  channel: $env.SLACK_CHANNEL_ID || 'general',\n  text: d.emoji + ' CyberSentinel CVE Alert: ' + d.cveid + ' (CVSS ' + d.cvss + ')',\n  blocks: [\n    { type: 'header', text: { type: 'plain_text', text: d.emoji + ' CVE Alert: ' + d.cveid } },\n    { type: 'section', fields: [\n      { type: 'mrkdwn', text: '*CVSS Score:*\\n' + d.cvss + ' (' + d.severity + ')' },\n      { type: 'mrkdwn', text: '*Exploit Status:*\\n' + (d.activeExploit ? '\ud83d\udea8 Actively Exploited' : '\u2705 No known exploit') },\n      { type: 'mrkdwn', text: '*Affected Products:*\\n' + products },\n      { type: 'mrkdwn', text: '*Published:*\\n' + d.humanTime }\n    ]},\n    { type: 'section', text: { type: 'mrkdwn', text: (exploitBadge ? exploitBadge + '\\n' : '') + analysisText } },\n    { type: 'divider' },\n    { type: 'context', elements: [{ type: 'mrkdwn', text: 'Source: NVD/CISA  |  CyberSentinel AI Intelligence  |  ' + d.humanTime }] }\n  ]\n}}];"
+        "jsCode": "const analysisText = ($json.choices && $json.choices[0]) ? $json.choices[0].message.content : 'Analysis unavailable — check OpenAI API key';\nconst d = $('Build CVE Prompt').item.json.cve;\nconst exploitBadge = d.activeExploit ? '🚨 *ACTIVELY EXPLOITED*' : '';\nconst products = Array.isArray(d.affectedProducts) && d.affectedProducts.length > 0 ? d.affectedProducts.slice(0,3).join(', ') : 'See description';\nreturn [{ json: {\n  channel: $env.SLACK_CHANNEL_ID || 'general',\n  text: d.emoji + ' CyberSentinel CVE Alert: ' + d.cveid + ' (CVSS ' + d.cvss + ')',\n  blocks: [\n    { type: 'header', text: { type: 'plain_text', text: d.emoji + ' CVE Alert: ' + d.cveid } },\n    { type: 'section', fields: [\n      { type: 'mrkdwn', text: '*CVSS Score:*\\n' + d.cvss + ' (' + d.severity + ')' },\n      { type: 'mrkdwn', text: '*Exploit Status:*\\n' + (d.activeExploit ? '🚨 Actively Exploited' : '✅ No known exploit') },\n      { type: 'mrkdwn', text: '*Affected Products:*\\n' + products },\n      { type: 'mrkdwn', text: '*Published:*\\n' + d.humanTime }\n    ]},\n    { type: 'section', text: { type: 'mrkdwn', text: (exploitBadge ? exploitBadge + '\\n' : '') + analysisText } },\n    { type: 'divider' },\n    { type: 'context', elements: [{ type: 'mrkdwn', text: 'Source: NVD/CISA  |  CyberSentinel AI Intelligence  |  ' + d.humanTime }] }\n  ]\n}}];"
       },
       "id": "build-cve-slack",
       "name": "Build Slack CVE Alert",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1120, 300]
+      "position": [
+        1120,
+        300
+      ]
     },
     {
       "parameters": {
@@ -75,40 +96,113 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Authorization", "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}" },
-            { "name": "Content-Type", "value": "application/json; charset=utf-8" }
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json; charset=utf-8"
+            }
           ]
         },
         "sendBody": true,
         "contentType": "json",
         "body": "={{ JSON.stringify($json) }}",
-        "options": { "response": { "response": { "neverError": true } } }
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
       },
       "id": "slack-cve",
       "name": "Slack: Post CVE Alert",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1340, 300]
+      "position": [
+        1340,
+        300
+      ]
     }
   ],
   "connections": {
     "Webhook: CVE Alert Trigger": {
-      "main": [[{ "node": "Parse CVE Data", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Parse CVE Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Parse CVE Data": {
-      "main": [[{ "node": "Build CVE Prompt", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Build CVE Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Build CVE Prompt": {
-      "main": [[{ "node": "Call OpenAI", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Call OpenAI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Call OpenAI": {
-      "main": [[{ "node": "Build Slack CVE Alert", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Build Slack CVE Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Build Slack CVE Alert": {
-      "main": [[{ "node": "Slack: Post CVE Alert", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Slack: Post CVE Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": false,
-  "settings": { "executionOrder": "v1", "saveManualExecutions": true, "callerPolicy": "workflowsFromSameOwner" },
-  "tags": [{"name": "cybersentinel"}, {"name": "cve"}, {"name": "intel"}, {"name": "production"}]
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": [
+    {
+      "name": "cybersentinel"
+    },
+    {
+      "name": "cve"
+    },
+    {
+      "name": "intel"
+    },
+    {
+      "name": "production"
+    }
+  ],
+  "id": "wf03-cve-intel-pipeline"
 }

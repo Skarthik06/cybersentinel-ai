@@ -34,10 +34,28 @@ id_ed25519.pub
 *.bak
 dump.rdb
 appendonly.aof
+appendonlydir/
+
+# ── API Keys / Token Files ────────────────────────────────────────────────────
+*.token
+*.secret
+*_secret.json
+*_credentials.json
+service-account*.json
+credentials.json
+token.json
 
 # ── n8n Credentials (may contain real API keys from UI configuration) ─────────
 n8n/credentials/
 n8n/.n8n/
+n8n_db_backup/
+
+# ── N8N Host Data Volume (SQLite DB with credentials stored by n8n UI) ────────
+# D:/N8N is outside the repo but guard against accidental inclusion
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
 
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
@@ -147,3 +165,17 @@ test-results/
 
 # ── Prometheus & Grafana Local State ─────────────────────────────────────────
 prometheus_data/
+
+# ── Python Virtual Environments (additional patterns) ────────────────────────
+.venv*/
+*.venv
+pyvenv.cfg
+
+# ── Package Manager Lock Files (optional — remove ! lines to commit them) ────
+# Uncomment if you want to exclude lock files:
+# package-lock.json
+# yarn.lock
+
+# ── PowerShell Credentials / Secure Strings ───────────────────────────────────
+*.ps1xml
+# Do NOT ignore *.ps1 — scripts/start_n8n.ps1 must be committed

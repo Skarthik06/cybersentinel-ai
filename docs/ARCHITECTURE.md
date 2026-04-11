@@ -253,7 +253,9 @@ All secrets are injected via environment variables from `.env`. No secret is har
 
 ### 5.4 Network Isolation
 
-All containers communicate on the `cybersentinel-net` bridge network. Only these ports are exposed to the host: 8080 (API), 5678 (n8n), 3001 (Grafana), 9090 (Prometheus), 9092 (Kafka external), 5432 (PostgreSQL external for admin). Redis, ChromaDB, and Zookeeper are not exposed externally by default.
+All containers communicate on the `cybersentinel-ai_cybersentinel-net` bridge network (Docker Compose prefixes the project directory name). Only these ports are exposed to the host: 8080 (API), 5678 (n8n), 3001 (Grafana), 9090 (Prometheus), 9092 (Kafka external), 5432 (PostgreSQL external for admin). Redis, ChromaDB, and Zookeeper are not exposed externally by default.
+
+> **Operational note:** The N8N container is started with `docker run` outside of Docker Compose. It must be explicitly connected to `cybersentinel-ai_cybersentinel-net` to reach `host.docker.internal:8080` (the API gateway). This is handled automatically by `scripts/start_n8n.ps1`.
 
 ---
 
@@ -308,6 +310,10 @@ A 2:1 input:output ratio is ideal for a structured JSON inference task — the m
 | n8n unavailable | SOAR workflows don't trigger | Bridge retries 3 times with backoff; events still in Kafka for replay |
 | DPI sensor exits | No new packet capture | Docker restart policy: `unless-stopped`; simulator can continue generating test events |
 | Traffic simulator only (no DPI) | behavior_profiles metrics are 0 | Expected and correct — RLM needs real packets; simulator tests AI pipeline only |
+| Grafana exits code 1 on startup | Observability dashboards unavailable | Remove `GF_INSTALL_PLUGINS` from docker-compose.yml — plugin download to grafana.com fails inside Docker network |
+| n8n workflows inactive after import | All webhooks 404, triggers FAILED | Run `scripts/activate_n8n_workflows.py` then `docker restart N8N` — script sets active=1, activeVersionId, and publishes workflow_history |
+| n8n LLM calls silently fail | Reports never generated | Recreate N8N container with `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` — required for `$env.OPENAI_API_KEY` to work in n8n 2.15+ |
+| API trigger returns 500 on long workflows | Frontend shows FAILED for valid runs | Use `httpx.AsyncClient(timeout=90)` and catch `TimeoutException` separately — OpenAI calls take 18–27s |
 
 ---
 
@@ -352,4 +358,20 @@ All services share the same Docker bridge network with no load balancing. Design
 
 ---
 
-*Architecture Document — CyberSentinel AI v1.0 — 2025/2026*
+---
+
+## 10. Operational Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/setup/install.sh` | First-time setup — builds all 14 Docker containers |
+| `scripts/setup/add_n8n.sh` | Adds n8n to the running stack |
+| `scripts/setup/reset.sh` | Full reset — wipes all data, rebuilds from scratch |
+| `scripts/start_n8n.ps1` | Start N8N with all required env vars; runs activation script; handles fresh setup |
+| `scripts/activate_n8n_workflows.py` | Repair n8n workflow activation state in SQLite — fixes inactive/unpublished workflows |
+
+See `docs/N8N_OPERATIONS.md` for the complete N8N operations reference.
+
+---
+
+*Architecture Document — CyberSentinel AI v1.2.2 — 2025/2026*
