@@ -28,15 +28,15 @@ frontend/
 ```bash
 # 1. Make sure CyberSentinel backend is running
 cd ..  # go to cybersentinel-ai root
-docker compose -f docker-compose.yml -f n8n/docker-compose.n8n.yml up -d
+docker compose up -d
 
-# 2. Start the frontend
+# 2. Start the frontend (development mode)
 cd frontend
 npm install
 npm run dev
 
 # 3. Open in browser
-# http://localhost:3000
+# http://localhost:5173
 ```
 
 ---
@@ -76,9 +76,10 @@ Default credentials (from `.env`):
 | Overview | 6 metric cards, alert timeline, platform health radar, risk gauge |
 | Alerts | Full alert table with severity, MITRE tags, anomaly score bars |
 | Incidents | Registry with OPEN/INVESTIGATING/RESOLVED/CLOSED tracking |
+| Response | Human-in-the-loop: Block Recommendations, Active Incidents, Firewall Rules |
 | Threat Intel | ChromaDB semantic search + MITRE ATT&CK coverage + CTI status |
 | Hosts | RLM behavioral profile lookup by IP address |
 
 ---
 
-*CyberSentinel AI Frontend v1.0 — Capstone 2025*
+*CyberSentinel AI Frontend v1.3.0 — Capstone 2025/2026*

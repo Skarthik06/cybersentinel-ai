@@ -57,6 +57,17 @@ KAFKA_TOPIC       = "raw-packets"          # Full DPI pipeline — NOT threat-al
 # Each scenario is a burst of packets, so RLM sees meaningful volume.
 EVENTS_PER_MINUTE = int(os.getenv("SIMULATION_RATE", "2"))
 
+# ── Kafka SASL/SCRAM-SHA-256 (optional — activated only when KAFKA_SASL_PASSWORD is set) ──
+_KAFKA_SASL_USERNAME = os.getenv("KAFKA_SASL_USERNAME", "")
+_KAFKA_SASL_PASSWORD = os.getenv("KAFKA_SASL_PASSWORD", "")
+_KAFKA_SASL_KWARGS: dict = (
+    {"security_protocol": "SASL_PLAINTEXT",
+     "sasl_mechanism": "SCRAM-SHA-256",
+     "sasl_plain_username": _KAFKA_SASL_USERNAME,
+     "sasl_plain_password": _KAFKA_SASL_PASSWORD}
+    if _KAFKA_SASL_PASSWORD else {}
+)
+
 # ── Realistic IP pools ────────────────────────────────────────────────────────
 EXTERNAL_C2_IPS = [
     "185.220.101.47",   # Tor exit node
@@ -767,6 +778,7 @@ class TrafficSimulator:
             bootstrap_servers=KAFKA_BOOTSTRAP,
             value_serializer=lambda v: json.dumps(v).encode("utf-8"),
             compression_type="gzip",
+            **_KAFKA_SASL_KWARGS,
         )
         await self.producer.start()
         logger.info(f"Kafka connected — streaming to '{KAFKA_TOPIC}'")

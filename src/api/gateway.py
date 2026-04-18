@@ -112,13 +112,15 @@ class IncidentResponse(BaseModel):
 
 
 class BlockRecommendationResponse(BaseModel):
-    incident_id:           str
-    title:                 str
-    severity:              str
-    block_target_ip:       Optional[str]
-    investigation_summary: Optional[str]
-    mitre_techniques:      list
-    created_at:            datetime
+    incident_id:            str
+    title:                  str
+    severity:               str
+    block_target_ip:        Optional[str]
+    investigation_summary:  Optional[str]
+    mitre_techniques:       list
+    created_at:             datetime
+    priority_score:         float = 0.0   # Composite analyst priority (0–100)
+    related_incident_count: int   = 0     # Other open incidents from same IP (campaign signal)
 
 
 class ThreatSearchRequest(BaseModel):
@@ -214,7 +216,11 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
         username: str = payload.get("sub")
         if not username:
             raise HTTPException(status_code=401, detail="Invalid token")
-        return {"username": username, "role": payload.get("role", "viewer")}
+        return {
+            "username": username,
+            "role":     payload.get("role",   "viewer"),
+            "tenant":   payload.get("tenant", "default"),
+        }
     except JWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -229,7 +235,8 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     """Authenticate against the users table in PostgreSQL."""
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT username, password_hash, role FROM users WHERE username = $1 AND is_active = TRUE",
+            "SELECT username, password_hash, role, COALESCE(tenant_id, 'default') AS tenant_id "
+            "FROM users WHERE username = $1 AND is_active = TRUE",
             form_data.username,
         )
     if not row or not pwd_context.verify(form_data.password, row["password_hash"]):
@@ -237,7 +244,12 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password",
         )
-    token = create_access_token({"sub": row["username"], "role": row["role"]})
+    # Include tenant_id in JWT for multi-tenancy scoping
+    token = create_access_token({
+        "sub":    row["username"],
+        "role":   row["role"],
+        "tenant": row.get("tenant_id", "default"),
+    })
     return {"access_token": token, "token_type": "bearer"}
 
 
@@ -556,23 +568,201 @@ async def get_block_recommendations(
     source: Optional[str] = Query(None, description="Filter by source: simulator or dpi"),
     user:   dict           = Depends(get_current_user),
 ):
-    """Return pending block recommendations — incidents flagged by AI awaiting analyst approval."""
+    """Return pending block recommendations sorted by composite analyst priority score.
+
+    Priority score (0-100) = severity_weight(40) + anomaly_score(40) + campaign_bonus(20)
+      severity_weight: CRITICAL=40, HIGH=30, MEDIUM=20, LOW=10
+      anomaly_score:   from behavior_profiles table for block_target_ip (0-1 scaled to 0-40)
+      campaign_bonus:  +20 if this IP has >= 2 other open incidents (kill chain signal)
+    """
     src_clause = ""
     params: list = []
     if source:
         params.append(source.lower())
-        src_clause = f"AND COALESCE(source, 'dpi') = $1"
+        src_clause = f"AND COALESCE(i.source, 'dpi') = $1"
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(f"""
-            SELECT incident_id, title, severity, block_target_ip,
-                   investigation_summary, mitre_techniques, created_at
-            FROM incidents
-            WHERE block_recommended = TRUE AND status = 'OPEN' {src_clause}
-            ORDER BY
-                CASE severity WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2 ELSE 3 END,
-                created_at DESC
+            SELECT i.incident_id, i.title, i.severity, i.block_target_ip,
+                   i.investigation_summary, i.mitre_techniques, i.created_at,
+                   COALESCE(bp.anomaly_score, 0.0) AS anomaly_score,
+                   COUNT(other.incident_id) FILTER (
+                       WHERE other.incident_id != i.incident_id
+                         AND other.status = 'OPEN'
+                   ) AS related_incident_count
+            FROM incidents i
+            LEFT JOIN behavior_profiles bp
+                   ON bp.entity_id = i.block_target_ip
+            LEFT JOIN incidents other
+                   ON i.block_target_ip IS NOT NULL
+                  AND i.block_target_ip != ''
+                  AND (other.block_target_ip = i.block_target_ip
+                       OR i.block_target_ip = ANY(other.affected_ips::text[]))
+            WHERE i.block_recommended = TRUE AND i.status = 'OPEN' {src_clause}
+            GROUP BY i.incident_id, i.title, i.severity, i.block_target_ip,
+                     i.investigation_summary, i.mitre_techniques, i.created_at,
+                     bp.anomaly_score
         """, *params)
-    return [BlockRecommendationResponse(**dict(r)) for r in rows]
+
+    _sev_weight = {"CRITICAL": 40, "HIGH": 30, "MEDIUM": 20, "LOW": 10}
+    results = []
+    for r in rows:
+        sev_w      = _sev_weight.get(r["severity"], 10)
+        anomaly_w  = round(float(r["anomaly_score"]) * 40, 1)
+        campaign_w = 20 if r["related_incident_count"] >= 2 else 0
+        priority   = round(sev_w + anomaly_w + campaign_w, 1)
+        results.append(BlockRecommendationResponse(
+            **{k: v for k, v in dict(r).items()
+               if k in BlockRecommendationResponse.model_fields
+               and k != "related_incident_count"},
+            priority_score=priority,
+            related_incident_count=int(r["related_incident_count"]),
+        ))
+
+    results.sort(key=lambda x: x.priority_score, reverse=True)
+    return results
+
+
+@app.get("/api/v1/campaigns/{ip}")
+async def get_campaign(
+    ip:   str,
+    user: dict = Depends(get_current_user),
+):
+    """
+    Kill chain / campaign correlation for a source IP.
+
+    Returns all incidents linked to this IP (as block_target_ip or in affected_ips),
+    ordered by creation time, with MITRE technique progression mapped to kill chain stages.
+    Use this to determine whether multiple alerts from the same IP represent a
+    coordinated multi-stage attack rather than isolated events.
+    """
+    # MITRE technique → kill chain stage mapping
+    _KILL_CHAIN = {
+        "T1595": "Reconnaissance",    "T1046": "Reconnaissance",
+        "T1190": "Initial Access",    "T1078": "Initial Access",
+        "T1059": "Execution",         "T1059.004": "Execution",
+        "T1110.001": "Credential Access", "T1110.003": "Credential Access",
+        "T1003": "Credential Access",
+        "T1021.001": "Lateral Movement", "T1021.002": "Lateral Movement",
+        "T1071.001": "Command & Control", "T1071.004": "Command & Control",
+        "T1572": "Command & Control",    "T1090.003": "Command & Control",
+        "T1048": "Exfiltration",         "T1048.003": "Exfiltration",
+        "T1027": "Defense Evasion",      "T1036": "Defense Evasion",
+        "T1486": "Impact",
+    }
+
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT incident_id, title, severity, status, mitre_techniques,
+                   investigation_summary, created_at, block_recommended,
+                   block_target_ip, affected_ips
+            FROM incidents
+            WHERE block_target_ip = $1
+               OR $1 = ANY(affected_ips::text[])
+            ORDER BY created_at ASC
+        """, ip)
+
+        profile_row = await conn.fetchrow(
+            "SELECT anomaly_score, observation_count, avg_bytes_per_min, "
+            "avg_entropy, profile_text FROM behavior_profiles WHERE entity_id = $1",
+            ip,
+        )
+
+    incidents = []
+    stages_seen = set()
+    for r in rows:
+        techniques = r["mitre_techniques"] or []
+        stages = list({_KILL_CHAIN.get(t, "Unknown") for t in techniques if t})
+        stages_seen.update(stages)
+        incidents.append({
+            "incident_id":          r["incident_id"],
+            "title":                r["title"],
+            "severity":             r["severity"],
+            "status":               r["status"],
+            "mitre_techniques":     techniques,
+            "kill_chain_stages":    stages,
+            "created_at":           r["created_at"].isoformat() if r["created_at"] else None,
+            "block_recommended":    r["block_recommended"],
+            "investigation_summary": (r["investigation_summary"] or "")[:300],
+        })
+
+    profile = {}
+    if profile_row:
+        profile = {
+            "anomaly_score":      profile_row["anomaly_score"],
+            "observation_count":  profile_row["observation_count"],
+            "avg_bytes_per_min":  profile_row["avg_bytes_per_min"],
+            "avg_entropy":        profile_row["avg_entropy"],
+            "profile_text":       profile_row["profile_text"],
+        }
+
+    _STAGE_ORDER = [
+        "Reconnaissance", "Initial Access", "Execution", "Credential Access",
+        "Lateral Movement", "Command & Control", "Exfiltration",
+        "Defense Evasion", "Impact", "Unknown",
+    ]
+    kill_chain_progression = [s for s in _STAGE_ORDER if s in stages_seen]
+
+    return {
+        "ip":                    ip,
+        "total_incidents":       len(incidents),
+        "open_incidents":        sum(1 for i in incidents if i["status"] == "OPEN"),
+        "kill_chain_stages":     kill_chain_progression,
+        "is_coordinated_attack": len(kill_chain_progression) >= 3,
+        "profile":               profile,
+        "incidents":             incidents,
+    }
+
+
+@app.get("/api/v1/campaigns")
+async def list_campaigns(
+    limit: int = 50,
+    source: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    """
+    List all attacker campaigns ordered by most recent activity.
+
+    A campaign groups multiple incidents from the same source IP that occurred
+    within a 24-hour window, enabling analysts to see coordinated multi-stage
+    attacks as a single entity rather than isolated events.
+
+    Use ?source=simulator or ?source=dpi to scope to a specific pipeline.
+    Simulator and DPI campaigns are always stored separately to prevent cross-
+    pipeline contamination.
+    """
+    async with db_pool.acquire() as conn:
+        if source:
+            rows = await conn.fetch("""
+                SELECT campaign_id, src_ip, source, first_seen, last_seen,
+                       incident_count, max_severity, mitre_stages, campaign_summary
+                FROM attacker_campaigns
+                WHERE source = $2
+                ORDER BY last_seen DESC
+                LIMIT $1
+            """, limit, source)
+        else:
+            rows = await conn.fetch("""
+                SELECT campaign_id, src_ip, source, first_seen, last_seen,
+                       incident_count, max_severity, mitre_stages, campaign_summary
+                FROM attacker_campaigns
+                ORDER BY last_seen DESC
+                LIMIT $1
+            """, limit)
+
+    return [
+        {
+            "campaign_id":      r["campaign_id"],
+            "src_ip":           r["src_ip"],
+            "source":           r["source"],
+            "first_seen":       r["first_seen"].isoformat() if r["first_seen"] else None,
+            "last_seen":        r["last_seen"].isoformat()  if r["last_seen"]  else None,
+            "incident_count":   r["incident_count"],
+            "max_severity":     r["max_severity"],
+            "mitre_stages":     r["mitre_stages"] or [],
+            "campaign_summary": r["campaign_summary"],
+        }
+        for r in rows
+    ]
 
 
 @app.post("/api/v1/incidents/{incident_id}/block")
@@ -999,6 +1189,19 @@ async def approve_report(report_id: str, user: dict = Depends(get_current_user))
                WHERE report_id = $1""",
             report_id, user.get("username", "unknown")
         )
+        # Audit trail: log approval action
+        await conn.execute(
+            """INSERT INTO audit_log (username, action, resource, resource_id, details)
+               VALUES ($1, 'REPORT_APPROVED', 'pending_reports', $2, $3)""",
+            user.get("username", "unknown"),
+            report_id,
+            json.dumps({
+                "workflow":    row["workflow"],
+                "title":       row["title"],
+                "slack_ok":    slack_ok,
+                "actioned_by": user.get("username"),
+            }),
+        )
     return {"report_id": report_id, "status": "APPROVED", "slack_ok": slack_ok}
 
 
@@ -1015,9 +1218,146 @@ async def deny_report(report_id: str, user: dict = Depends(get_current_user)):
                WHERE report_id = $1 AND status = 'PENDING'""",
             report_id, user.get("username", "unknown")
         )
+        # Audit trail: log deny action
+        await conn.execute(
+            """INSERT INTO audit_log (username, action, resource, resource_id, details)
+               VALUES ($1, 'REPORT_DENIED', 'pending_reports', $2, $3)""",
+            user.get("username", "unknown"),
+            report_id,
+            json.dumps({"workflow": "n8n", "actioned_by": user.get("username")}),
+        )
     if updated == "UPDATE 0":
         raise HTTPException(status_code=404, detail="Pending report not found")
     return {"report_id": report_id, "status": "DENIED"}
+
+
+# ── GDPR Data Management ──────────────────────────────────────────────────────
+
+@app.delete("/api/v1/data/erasure/{ip}")
+async def gdpr_erase_ip(
+    ip: str,
+    user: dict = Depends(get_current_user),
+):
+    """
+    GDPR Right to Erasure — delete all data associated with an IP address.
+
+    Removes the IP from: alerts, incidents (affected_ips), behavior_profiles,
+    firewall_rules, and the Redis block cache. Inserts an audit record.
+
+    Requires admin role. Cannot be undone.
+    """
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required for data erasure")
+
+    clean_ip = ip.strip()
+    deleted: dict = {}
+
+    async with db_pool.acquire() as conn:
+        # alerts — delete rows where src_ip or dst_ip matches
+        r = await conn.execute(
+            "DELETE FROM alerts WHERE host(src_ip) = $1 OR host(dst_ip) = $1",
+            clean_ip,
+        )
+        deleted["alerts"] = int(r.split()[-1]) if r else 0
+
+        # behavior_profiles
+        r = await conn.execute(
+            "DELETE FROM behavior_profiles WHERE entity_id = $1",
+            clean_ip,
+        )
+        deleted["behavior_profiles"] = int(r.split()[-1]) if r else 0
+
+        # firewall_rules
+        r = await conn.execute(
+            "DELETE FROM firewall_rules WHERE host(ip_address::inet) = $1",
+            clean_ip,
+        )
+        deleted["firewall_rules"] = int(r.split()[-1]) if r else 0
+
+        # incidents — remove IP from affected_ips array (but keep incident)
+        r = await conn.execute(
+            """UPDATE incidents
+               SET affected_ips = array_remove(affected_ips, $1),
+                   updated_at   = NOW()
+               WHERE $1 = ANY(affected_ips)""",
+            clean_ip,
+        )
+        deleted["incidents_ip_removed"] = int(r.split()[-1]) if r else 0
+
+        # incidents where block_target_ip matches — redact IP
+        r = await conn.execute(
+            """UPDATE incidents
+               SET block_target_ip = NULL,
+                   updated_at      = NOW()
+               WHERE block_target_ip = $1""",
+            clean_ip,
+        )
+        deleted["incidents_target_redacted"] = int(r.split()[-1]) if r else 0
+
+        # Audit: record the erasure (do this AFTER deleting so audit survives)
+        await conn.execute(
+            """INSERT INTO audit_log (username, action, resource, resource_id, details)
+               VALUES ($1, 'GDPR_ERASURE', 'ip_address', $2, $3)""",
+            user.get("username", "unknown"),
+            clean_ip,
+            json.dumps({"deleted": deleted, "tenant": user.get("tenant", "default")}),
+        )
+
+    # Redis: remove block and isolation keys
+    redis_deleted = 0
+    for key in [f"blocked:{clean_ip}", f"isolated:{clean_ip}", f"blocked:{clean_ip}/32"]:
+        redis_deleted += await redis_client.delete(key)
+    deleted["redis_keys"] = redis_deleted
+
+    return {
+        "ip":        clean_ip,
+        "erased":    True,
+        "deleted":   deleted,
+        "message":   f"All data for IP {clean_ip} has been erased per GDPR request.",
+    }
+
+
+@app.get("/api/v1/data/retention")
+async def get_retention_policy(user: dict = Depends(get_current_user)):
+    """
+    Return current data retention configuration and live table sizes.
+    Used to verify GDPR compliance — shows how long data is kept.
+    """
+    async with db_pool.acquire() as conn:
+        # TimescaleDB hypertable size stats
+        sizes = await conn.fetch("""
+            SELECT hypertable_name AS table_name,
+                   pg_size_pretty(hypertable_size(format('%I', hypertable_name)::regclass)) AS size,
+                   num_chunks
+            FROM timescaledb_information.hypertables
+            WHERE hypertable_schema = 'public'
+        """)
+
+        counts = await conn.fetchrow("""
+            SELECT
+                (SELECT COUNT(*) FROM alerts)           AS total_alerts,
+                (SELECT COUNT(*) FROM incidents)        AS total_incidents,
+                (SELECT COUNT(*) FROM behavior_profiles) AS total_profiles,
+                (SELECT COUNT(*) FROM firewall_rules)   AS total_fw_rules,
+                (SELECT COUNT(*) FROM audit_log)        AS total_audit_entries
+        """)
+
+    return {
+        "retention_policies": {
+            "packets":           "30 days (TimescaleDB auto-drop)",
+            "alerts":            "No auto-drop (manual archival)",
+            "incidents":         "No auto-drop (manual archival)",
+            "behavior_profiles": "Evicted after inactivity via rlm_engine TTL config",
+            "audit_log":         "Permanent (compliance record)",
+        },
+        "gdpr_controls": {
+            "right_to_erasure":  "DELETE /api/v1/data/erasure/{ip}",
+            "data_minimization": "DPI does not capture payload content; entropy only",
+            "pseudonymization":  "IPs stored as INET type, not linked to PII",
+        },
+        "table_sizes": [dict(r) for r in sizes],
+        "row_counts":  dict(counts) if counts else {},
+    }
 
 
 if __name__ == "__main__":

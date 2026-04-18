@@ -206,4 +206,4 @@
 
 ---
 
-*CyberSentinel AI — Abbreviations & Glossary — v1.2.1 — 2026*
+*CyberSentinel AI — Abbreviations & Glossary — v1.3.0 — 2026*

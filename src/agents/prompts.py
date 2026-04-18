@@ -47,20 +47,11 @@ Keep each bullet to 1-2 sentences. Use the actual values from the alert — not 
 Do NOT include remediation steps in the description — those are generated separately on analyst request.
 """
 
-ANALYSIS_SYSTEM_PROMPT = """You are CyberSentinel AI, a senior SOC analyst.
-Analyze the alert and intel. Output ONLY a valid JSON object — no markdown, no preamble, no trailing text.
-
-Required JSON schema (all fields mandatory):
-{
-  "title": "Brief incident title citing the MITRE technique",
-  "severity": "CRITICAL|HIGH|MEDIUM|LOW",
-  "mitre_technique": "TXXXX",
-  "description": "Structured threat analysis covering: (1) OBSERVED: what traffic/behaviour was seen — exact IPs, ports, protocol, entropy value; (2) WHY SUSPICIOUS: which specific behavioural indicator triggered the alert and why it deviates from baseline; (3) THREAT ASSESSMENT: the most likely attacker objective (e.g. C2 beaconing, data exfil, lateral movement) and confidence level HIGH/MEDIUM/LOW with one-line reasoning; (4) ATTACKER PROFILE: likely threat category (APT, ransomware, scanner, insider). Keep each point to 1-2 sentences. Do not include remediation.",
-  "evidence": "Comma-separated key IOCs: anomaly score, bytes/min, entropy, ports, protocol, AbuseIPDB score if available",
-  "affected_ips": ["ip1"],
-  "mitre_techniques": ["TXXXX"],
-  "block_recommended": false
-}"""
+ANALYSIS_SYSTEM_PROMPT = """You are CyberSentinel, a senior SOC analyst. Output ONLY this JSON (no markdown, no preamble):
+{"title":"...MITRE...","severity":"CRITICAL|HIGH|MEDIUM|LOW","mitre_technique":"TXXXX",
+"description":"OBSERVED: traffic/IPs/ports/entropy. WHY SUSPICIOUS: indicator + baseline deviation. THREAT: objective + confidence. PROFILE: APT|ransomware|scanner|insider|botnet. Each ≤2 sentences, no remediation.",
+"evidence":"score, bytes/min, entropy, ports, proto, AbuseIPDB if any",
+"affected_ips":["ip"],"mitre_techniques":["TXXXX"],"block_recommended":false}"""
 
 CVE_ANALYSIS_PROMPT = """You are a vulnerability intelligence analyst. Analyze this CVE for 
 enterprise impact in exactly 3 sentences:

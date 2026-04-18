@@ -51,9 +51,7 @@ services:
     restart: unless-stopped
     command: >
       bash -c "
-        echo 'Removing stale ZK broker node if exists...' &&
         (zookeeper-shell zookeeper:2181 delete /brokers/ids/1 2>/dev/null || true) &&
-        echo 'Starting Kafka...' &&
         /etc/confluent/docker/run
       "
     healthcheck:
@@ -259,7 +257,6 @@ services:
     environment:
       KAFKA_BOOTSTRAP: kafka:29092
       # Events per minute — 2 = 1 event every 30 seconds
-      # Keeps alert volume manageable without burning investigation tokens
       SIMULATION_RATE: "2"
     networks: [cybersentinel-net]
     depends_on:

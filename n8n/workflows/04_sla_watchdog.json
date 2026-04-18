@@ -3,26 +3,6 @@
   "nodes": [
     {
       "parameters": {
-        "rule": {
-          "interval": [
-            {
-              "field": "minutes",
-              "minutesInterval": 15
-            }
-          ]
-        }
-      },
-      "id": "sla-trigger",
-      "name": "Every 15 Minutes",
-      "type": "n8n-nodes-base.scheduleTrigger",
-      "typeVersion": 1.1,
-      "position": [
-        240,
-        200
-      ]
-    },
-    {
-      "parameters": {
         "httpMethod": "POST",
         "path": "run-sla-check",
         "responseMode": "lastNode",
@@ -191,17 +171,6 @@
     }
   ],
   "connections": {
-    "Every 15 Minutes": {
-      "main": [
-        [
-          {
-            "node": "Authenticate",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Manual Trigger: SLA Check": {
       "main": [
         [

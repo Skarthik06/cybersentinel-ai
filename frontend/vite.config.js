@@ -7,8 +7,8 @@ export default defineConfig({
     port: 3000,
     proxy: {
       // Proxies /api calls to the CyberSentinel FastAPI backend
-      '/api': { target: 'http://localhost:8080', changeOrigin: true },
-      '/auth': { target: 'http://localhost:8080', changeOrigin: true },
+      '/api': { target: 'http://api-gateway:8080', changeOrigin: true },
+      '/auth': { target: 'http://api-gateway:8080', changeOrigin: true },
     }
   }
 })

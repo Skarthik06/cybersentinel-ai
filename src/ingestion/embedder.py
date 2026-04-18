@@ -260,6 +260,16 @@ async def batch_upsert(
                 await mark_embed_cached(redis_client, doc, collection_name)
 
     logger.info(f"✅ Embedded {embedded_count} docs into '{collection_name}' (batch_size={batch_size})")
+
+    # Cache invalidation: notify the RLM engine that threat intel changed.
+    # The RLM checks "threat_intel_updated:{collection}" before using its embed
+    # cache — if this key exists, it bypasses the cache and re-scores profiles
+    # against the updated collection. TTL=3600s so the next RLM cycle will re-score.
+    _SCORED_COLLECTIONS = {"cve_database", "cti_reports", "threat_signatures"}
+    if redis_client and embedded_count > 0 and collection_name in _SCORED_COLLECTIONS:
+        await redis_client.setex(f"threat_intel_updated:{collection_name}", 3600, "1")
+        logger.info(f"🔔 Invalidated RLM embed cache for '{collection_name}' — {embedded_count} new docs")
+
     return embedded_count
 
 

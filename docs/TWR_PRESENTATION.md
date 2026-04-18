@@ -2,7 +2,7 @@
 ## AI-Powered Autonomous Threat Detection and Security Operations Platform
 
 **Presented by:** S KARTHIK
-**Project Version:** 1.2.1
+**Project Version:** 1.3.0
 **Date:** April 2026
 **Classification:** Academic Capstone Project
 
@@ -911,5 +911,5 @@ The platform is not a prototype or proof-of-concept — it is a working, deploya
 
 ---
 
-*CyberSentinel AI — Technical Work Report — Version 1.2.1 — April 2026*
+*CyberSentinel AI — Technical Work Report — Version 1.3.0 — April 2026*
 *S KARTHIK — Academic Capstone Project 2025/2026*

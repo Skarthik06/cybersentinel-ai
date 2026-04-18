@@ -3,26 +3,6 @@
   "nodes": [
     {
       "parameters": {
-        "rule": {
-          "interval": [
-            {
-              "field": "cronExpression",
-              "expression": "0 7 * * 1-5"
-            }
-          ]
-        }
-      },
-      "id": "schedule-trigger",
-      "name": "Schedule: 7AM Mon–Fri",
-      "type": "n8n-nodes-base.scheduleTrigger",
-      "typeVersion": 1,
-      "position": [
-        240,
-        300
-      ]
-    },
-    {
-      "parameters": {
         "httpMethod": "POST",
         "path": "run-daily-report",
         "responseMode": "lastNode",
@@ -243,17 +223,6 @@
     }
   ],
   "connections": {
-    "Schedule: 7AM Mon–Fri": {
-      "main": [
-        [
-          {
-            "node": "Authenticate API",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Manual Trigger: Daily Report": {
       "main": [
         [

@@ -13,6 +13,7 @@
 !.env.example
 
 # ── SSL / TLS / Certificates ──────────────────────────────────────────────────
+certs/
 *.pem
 *.key
 *.crt
@@ -25,6 +26,9 @@ id_rsa
 id_rsa.pub
 id_ed25519
 id_ed25519.pub
+
+# Kubernetes secrets with real values (template secrets.yaml is committed)
+k8s/secrets.local.yaml
 
 # ── Database Dumps & Backups ──────────────────────────────────────────────────
 *.dump

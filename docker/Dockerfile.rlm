@@ -10,7 +10,8 @@ RUN pip install --no-cache-dir \
     chromadb==0.4.22 \
     asyncpg==0.29.0 \
     redis[asyncio]==5.0.1 \
-    sentence-transformers==2.7.0
+    sentence-transformers==2.7.0 \
+    scikit-learn==1.4.2
 
 COPY src/models ./src/models
 COPY src/core ./src/core

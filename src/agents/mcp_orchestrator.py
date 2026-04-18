@@ -40,6 +40,71 @@ REDIS_URL = os.getenv("REDIS_URL")
 SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK", "")
 PAGERDUTY_KEY = os.getenv("PAGERDUTY_KEY", "")
 
+# ── Kafka SASL/SCRAM-SHA-256 (optional — activated only when KAFKA_SASL_PASSWORD is set) ──
+_KAFKA_SASL_USERNAME = os.getenv("KAFKA_SASL_USERNAME", "")
+_KAFKA_SASL_PASSWORD = os.getenv("KAFKA_SASL_PASSWORD", "")
+_KAFKA_SASL_KWARGS: dict = (
+    {"security_protocol": "SASL_PLAINTEXT",
+     "sasl_mechanism": "SCRAM-SHA-256",
+     "sasl_plain_username": _KAFKA_SASL_USERNAME,
+     "sasl_plain_password": _KAFKA_SASL_PASSWORD}
+    if _KAFKA_SASL_PASSWORD else {}
+)
+
+
+async def _correlate_campaign_with_pool(
+    db_pool, incident_id: str, src_ip: str, severity: str, mitre_techniques: list,
+    source: str = "dpi"
+) -> None:
+    """Link incident to an attacker campaign — create or extend a 24-hour window per src_ip.
+
+    Groups incidents from the same source IP AND same source pipeline that occur within
+    24 hours into a single campaign record. Simulator and DPI campaigns are kept
+    separate to prevent cross-pipeline contamination.
+    """
+    if not src_ip or src_ip in ("unknown", ""):
+        return
+    _SEV_ORDER = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT campaign_id, max_severity, mitre_stages
+                FROM attacker_campaigns
+                WHERE src_ip = $1 AND source = $2 AND last_seen > NOW() - INTERVAL '24 hours'
+                ORDER BY last_seen DESC LIMIT 1
+            """, src_ip, source)
+            if row:
+                campaign_id = row["campaign_id"]
+                new_max = (severity
+                           if _SEV_ORDER.get(severity, 0) > _SEV_ORDER.get(row["max_severity"], 0)
+                           else row["max_severity"])
+                merged = sorted(set(row["mitre_stages"] or []) | set(mitre_techniques))
+                await conn.execute("""
+                    UPDATE attacker_campaigns
+                    SET last_seen = NOW(), incident_count = incident_count + 1,
+                        max_severity = $2, mitre_stages = $3
+                    WHERE campaign_id = $1
+                """, campaign_id, new_max, merged)
+            else:
+                campaign_id = (
+                    f"CAM-{src_ip.replace('.', '-')}"
+                    f"-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+                )
+                await conn.execute("""
+                    INSERT INTO attacker_campaigns
+                        (campaign_id, src_ip, source, first_seen, last_seen,
+                         incident_count, max_severity, mitre_stages)
+                    VALUES ($1, $2, $3, NOW(), NOW(), 1, $4, $5)
+                """, campaign_id, src_ip, source, severity, mitre_techniques)
+            await conn.execute("""
+                INSERT INTO campaign_incidents (campaign_id, incident_id)
+                VALUES ($1, $2) ON CONFLICT DO NOTHING
+            """, campaign_id, incident_id)
+        logger.info(f"🔗 Campaign correlated: {campaign_id} ← {incident_id} [{src_ip}] source={source}")
+    except Exception as e:
+        logger.warning(f"Campaign correlation failed for {incident_id}: {e}")
+
+
 # MCP_TOOLS imported from src.agents.tools (see tools.py for canonical definitions)
 
 
@@ -296,7 +361,9 @@ class MCPToolExecutor:
         return f"Notification logged (no external webhook configured): [{severity}] {title}"
 
     async def _create_incident(self, args: Dict) -> str:
-        incident_id = f"INC-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        # Use millisecond precision to avoid duplicate key when multiple alerts
+        # arrive within the same second (epoch-second PKs collide).
+        incident_id = f"INC-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')[:19]}"
 
         def _to_list(val):
             """Accept a Python list or JSON-encoded list string from the LLM."""
@@ -332,6 +399,14 @@ class MCPToolExecutor:
                 block_recommended, block_target_ip,
                 args.get("source", "dpi"))
         logger.info(f"📋 Incident created: {incident_id} [{args['severity']}] {args['title']}")
+
+        # Fire-and-forget campaign correlation — never blocks or fails incident creation
+        _src = args.get("block_target_ip", "") or (affected_ips[0] if affected_ips else "")
+        asyncio.ensure_future(_correlate_campaign_with_pool(
+            self.db, incident_id, _src, args["severity"], mitre_techniques,
+            source=args.get("source", "dpi")
+        ))
+
         return f"✅ Incident created: {incident_id} — {args['title']}"
 
     async def _query_packet_history(self, args: Dict) -> str:
@@ -381,20 +456,22 @@ def _summarize_result(tool_name: str, result: str) -> str:
     if not result or result.startswith("No ") or result.startswith("Error"):
         return result[:80]
     if tool_name == "query_threat_database":
-        # Keep first match line only — MITRE + severity + brief pattern
-        return result.split("\n")[0][:120]
+        # First match line: MITRE + severity + pattern. 200 chars keeps key context
+        # for the LLM's "OBSERVED" + "THREAT" sections of the incident description.
+        return result.split("\n")[0][:200]
     if tool_name == "get_host_profile":
-        return result[:100]
+        # 250 chars keeps top peers, ports, MITRE history — feeds rich
+        # "WHY SUSPICIOUS" baseline-deviation analysis in the incident summary.
+        return result[:250]
     if tool_name == "lookup_ip_reputation":
-        # Extract score + country line only
         for line in result.split("\n"):
             if "confidence=" in line or "AbuseIPDB" in line:
-                return line.strip()[:120]
-        return result[:100]
+                return line.strip()[:160]
+        return result[:120]
     if tool_name == "get_recent_alerts":
         lines = [l for l in result.split("\n") if l.strip()]
-        return "\n".join(lines[:3])[:200]
-    return result[:100]
+        return "\n".join(lines[:3])[:240]
+    return result[:120]
 
 
 class InvestigateAgent:
@@ -422,8 +499,14 @@ class InvestigateAgent:
         Token cost: ~600-700 input tokens vs ~5,500 in the old multi-round loop (~88% reduction).
         API calls per investigation: 1 (was 3).
         """
-        # Strip raw_event (duplicate of all other fields) — saves ~300 redundant tokens
-        alert_slim = {k: v for k, v in alert.items() if k != "raw_event"}
+        # Drop fields already represented in the intel summaries (host_summary covers
+        # profile_summary/observation_count/avg_*; threat_summary covers threat_description
+        # and matched_mitre). Saves ~400 input tokens per investigation.
+        _drop = {
+            "raw_event", "profile_summary", "threat_description", "matched_mitre",
+            "observation_count", "avg_bytes_per_min", "avg_entropy",
+        }
+        alert_slim = {k: v for k, v in alert.items() if k not in _drop and v not in (None, "")}
         alert_text = json.dumps(alert_slim, separators=(",", ":"))
         src_ip     = alert.get("src_ip", "unknown")
         dst_ip     = alert.get("dst_ip", "")
@@ -462,15 +545,21 @@ class InvestigateAgent:
             f"- Recent alerts: {recent_summary}"
         )
 
-        response = await self._chat_with_retry(
-            messages=[{"role": "user", "content": intel_context}],
-            tools=None,
-            system=ANALYSIS_SYSTEM_PROMPT,
-            max_tokens=1024,
-        )
+        try:
+            response = await self._chat_with_retry(
+                messages=[{"role": "user", "content": intel_context}],
+                tools=None,
+                system=ANALYSIS_SYSTEM_PROMPT,
+                # 768 leaves headroom for full 4-section description + evidence in JSON.
+                # Description = OBSERVED + WHY SUSPICIOUS + THREAT + PROFILE (~400-500 out tokens).
+                max_tokens=768,
+            )
+            raw_text = response.text.strip() if response.text else ""
+        except Exception as llm_err:
+            logger.error(f"LLM unavailable for {alert_type} — using rule-based fallback: {llm_err}")
+            raw_text = json.dumps(self._rule_based_verdict(alert))
 
         # ── Step 4: Parse JSON verdict ─────────────────────────────────────
-        raw_text = response.text.strip() if response.text else ""
 
         # Strip markdown code fences if the model wraps its output
         if raw_text.startswith("```"):
@@ -528,6 +617,83 @@ class InvestigateAgent:
             "analysis":     analysis,
             "alert":        alert,
             "llm_provider": self.llm.name(),
+        }
+
+    def _rule_based_verdict(self, alert: Dict) -> Dict:
+        """
+        Deterministic rule-based investigation fallback used when the LLM API is
+        unavailable. Generates a structured verdict from alert fields alone — no
+        external calls. Ensures incidents are always created even during LLM outages.
+
+        Rules:
+          - CRITICAL + anomaly_score > 0.8  → block_recommended=True, HIGH confidence
+          - CRITICAL                         → block_recommended=True, MEDIUM confidence
+          - HIGH + known MITRE              → block_recommended=True, MEDIUM confidence
+          - MEDIUM / LOW                    → block_recommended=False, LOW confidence
+        """
+        sev          = alert.get("severity", "MEDIUM")
+        alert_type   = alert.get("type", "UNKNOWN")
+        anomaly      = float(alert.get("anomaly_score", 0.0))
+        mitre        = alert.get("mitre_technique", "")
+        src_ip       = alert.get("src_ip", "unknown")
+        dst_ip       = alert.get("dst_ip", "")
+
+        _block_sevs = {"CRITICAL", "HIGH"}
+        block_rec   = sev in _block_sevs
+
+        if sev == "CRITICAL" and anomaly > 0.8:
+            confidence  = "HIGH"
+            description = (
+                f"OBSERVED: {alert_type} from {src_ip} to {dst_ip or 'unknown'} "
+                f"with anomaly score {anomaly:.3f}.\n"
+                f"WHY SUSPICIOUS: Anomaly score {anomaly:.3f} exceeds CRITICAL threshold "
+                f"and behavioral profile matches high-confidence threat pattern.\n"
+                f"THREAT ASSESSMENT: Active threat — {mitre or 'technique TBD'} — HIGH confidence. "
+                f"Immediate analyst review required.\n"
+                f"ATTACKER PROFILE: Determined adversary — pattern matches known APT/targeted attack TTPs."
+            )
+        elif sev == "CRITICAL":
+            confidence  = "MEDIUM"
+            description = (
+                f"OBSERVED: {alert_type} from {src_ip} — severity CRITICAL, "
+                f"anomaly score {anomaly:.3f}.\n"
+                f"WHY SUSPICIOUS: Critical severity threshold triggered with "
+                f"{'MITRE ' + mitre if mitre else 'behavioral anomaly'}.\n"
+                f"THREAT ASSESSMENT: Likely malicious — {mitre or 'TBD'} — MEDIUM confidence. "
+                f"[NOTE: LLM unavailable — rule-based assessment]\n"
+                f"ATTACKER PROFILE: Unknown — insufficient context for full classification."
+            )
+        elif sev == "HIGH":
+            confidence  = "MEDIUM"
+            description = (
+                f"OBSERVED: {alert_type} from {src_ip} — severity HIGH, "
+                f"anomaly score {anomaly:.3f}.\n"
+                f"WHY SUSPICIOUS: High-severity behavioral indicator triggered "
+                f"{'— ' + mitre if mitre else ''}.\n"
+                f"THREAT ASSESSMENT: Suspicious activity — MEDIUM confidence. "
+                f"[NOTE: LLM unavailable — rule-based assessment]\n"
+                f"ATTACKER PROFILE: Unknown — analyst review recommended."
+            )
+        else:
+            confidence  = "LOW"
+            description = (
+                f"OBSERVED: {alert_type} from {src_ip} — severity {sev}.\n"
+                f"WHY SUSPICIOUS: Anomaly threshold triggered (score={anomaly:.3f}).\n"
+                f"THREAT ASSESSMENT: Low-medium severity — LOW confidence. "
+                f"[NOTE: LLM unavailable — rule-based assessment]\n"
+                f"ATTACKER PROFILE: Likely automated scanner or misconfigured host."
+            )
+
+        return {
+            "title":             f"{alert_type} — {sev} [Rule-Based]",
+            "severity":          sev,
+            "mitre_technique":   mitre,
+            "mitre_techniques":  [mitre] if mitre else [],
+            "description":       description,
+            "evidence":          f"anomaly_score={anomaly:.3f} src={src_ip} dst={dst_ip} confidence={confidence}",
+            "affected_ips":      [src_ip],
+            "block_recommended": block_rec,
+            "block_target_ip":   dst_ip or src_ip,
         }
 
     async def _chat_with_retry(self, **kwargs) -> "LLMResponse":
@@ -593,6 +759,8 @@ class MCPOrchestrator:
         self._last_investigation_at: float = 0.0
         # Minimum seconds between investigations (4 tool calls per investigation → need ~60s gap)
         self._investigation_interval: float = float(os.getenv("INVESTIGATION_INTERVAL_SEC", "60"))
+        # Separate timer for pending backlog — drains independently when queue is empty
+        self._last_backlog_at: float = 0.0
 
     async def start(self):
         logger.info("🎯 CyberSentinel MCP Orchestrator starting...")
@@ -608,18 +776,12 @@ class MCPOrchestrator:
         self.producer = AIOKafkaProducer(
             bootstrap_servers=KAFKA_BOOTSTRAP,
             value_serializer=lambda v: json.dumps(v).encode(),
+            **_KAFKA_SASL_KWARGS,
         )
         await self.producer.start()
 
         self.executor = MCPToolExecutor(self.chroma_client, self.db_pool, self.redis)
         self.investigate_agent = InvestigateAgent(self.executor)
-
-        # Default DPI investigations to paused on first run so simulator and live
-        # investigations are always independent — user must explicitly enable each.
-        # Only sets the key if it doesn't already exist (preserves user preference).
-        if not await self.redis.exists("investigations:paused:dpi"):
-            await self.redis.set("investigations:paused:dpi", "1")
-            logger.info("🔒 DPI investigations defaulted to paused — enable via dashboard Live mode toggle")
 
         logger.info("✅ All agents initialized — starting orchestration")
 
@@ -640,6 +802,7 @@ class MCPOrchestrator:
             session_timeout_ms=30000,    # 30s — stale sessions expire before socket timeout
             heartbeat_interval_ms=3000,  # heartbeat every 3s (must be < session_timeout/3)
             max_poll_interval_ms=600000, # allow up to 10 min between polls
+            **_KAFKA_SASL_KWARGS,
         )
         await consumer.start()
         logger.info("👂 Listening for alerts on enriched-alerts, threat-alerts")
@@ -700,16 +863,19 @@ class MCPOrchestrator:
             try:
                 priority, alert = await asyncio.wait_for(self.alert_queue.get(), timeout=5.0)
             except asyncio.TimeoutError:
+                # Queue empty — drain pending backlog independently of the main rate limiter
+                now = _time.time()
+                backlog_interval = float(os.getenv("BACKLOG_INTERVAL_SEC", "30"))
+                if now - self._last_backlog_at >= backlog_interval:
+                    processed = await self._reinvestigate_pending()
+                    if processed:
+                        self._last_backlog_at = _time.time()
                 continue
 
-            # Global rate limiter — honour free-tier quota (5 req/min for Gemini)
-            now = _time.time()
-            wait_sec = self._investigation_interval - (now - self._last_investigation_at)
-            if wait_sec > 0:
-                logger.info(f"⏳ Rate-limit wait {wait_sec:.0f}s before next investigation")
-                await asyncio.sleep(wait_sec)
-
-            # Check if investigations are paused per source (simulator vs dpi)
+            # Check if investigations are paused per source BEFORE rate-limiting.
+            # Paused-source alerts (e.g. DPI when analyst paused it) are logged
+            # immediately without consuming an investigation rate-limit slot — this
+            # prevents a flood of paused DPI alerts from blocking simulator alerts.
             source = alert.get("source", "dpi")
             pause_key = f"investigations:paused:{source}"
             if await self.redis.exists(pause_key):
@@ -717,6 +883,14 @@ class MCPOrchestrator:
                 await self._log_alert(alert)
                 await self._create_pending_incident(alert)
                 continue
+
+            # Global rate limiter — honour free-tier quota (5 req/min for Gemini)
+            # Only reached for alerts that WILL be investigated.
+            now = _time.time()
+            wait_sec = self._investigation_interval - (now - self._last_investigation_at)
+            if wait_sec > 0:
+                logger.info(f"⏳ Rate-limit wait {wait_sec:.0f}s before next investigation")
+                await asyncio.sleep(wait_sec)
 
             self._last_investigation_at = _time.time()
             investigation = None
@@ -740,8 +914,9 @@ class MCPOrchestrator:
                     alert.get("type", "UNKNOWN"),
                     alert.get("severity", "LOW"),
                     datetime.fromisoformat(alert.get("timestamp", datetime.utcnow().isoformat())),
-                    alert.get("src_ip"),
-                    alert.get("dst_ip"),
+                    # Postgres INET column rejects '' — coerce empty strings to NULL
+                    alert.get("src_ip") or None,
+                    alert.get("dst_ip") or None,
                     alert.get("description", alert.get("threat_description", "")),
                     alert.get("mitre_technique", ""),
                     alert.get("anomaly_score"),
@@ -752,11 +927,129 @@ class MCPOrchestrator:
         except Exception as e:
             logger.error(f"Alert log failed: {e}")
 
+    async def _reinvestigate_pending(self) -> bool:
+        """Pick the oldest pending incident (investigation_summary LIKE '⏸%') and run a full
+        AI investigation, updating it in-place. Uses its own rate timer so it drains the
+        backlog during quiet periods without consuming new-alert investigation slots.
+        Returns True if an incident was processed."""
+        try:
+            async with self.db_pool.acquire() as conn:
+                row = await conn.fetchrow("""
+                    SELECT incident_id, title, severity, description, affected_ips,
+                           mitre_techniques, source, created_at
+                    FROM incidents
+                    WHERE investigation_summary LIKE '⏸%' AND status = 'OPEN'
+                    ORDER BY
+                        CASE severity WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2
+                                      WHEN 'MEDIUM' THEN 3 ELSE 4 END,
+                        created_at ASC
+                    LIMIT 1
+                """)
+            if not row:
+                return False
+
+            incident_id = row["incident_id"]
+            src_ip  = (row["affected_ips"] or ["unknown"])[0]
+            mitre   = (row["mitre_techniques"] or [""])[0]
+            source  = row["source"] or "dpi"
+
+            # Reconstruct alert from incident fields, enrich from alerts table if available
+            alert: Dict = {
+                "type":            row["title"].split(" — ")[0] if " — " in row["title"] else row["title"],
+                "severity":        row["severity"],
+                "src_ip":          src_ip,
+                "description":     row["description"] or "",
+                "mitre_technique": mitre,
+                "source":          source,
+                "timestamp":       row["created_at"].isoformat(),
+            }
+            async with self.db_pool.acquire() as conn:
+                alert_row = await conn.fetchrow("""
+                    SELECT type, severity, dst_ip, anomaly_score, mitre_technique, description
+                    FROM alerts WHERE src_ip = $1 AND source = $2
+                    ORDER BY timestamp DESC LIMIT 1
+                """, src_ip, source)
+            if alert_row:
+                alert.update({k: v for k, v in dict(alert_row).items() if v is not None})
+
+            logger.info(f"🔄 Backlog: re-investigating pending incident {incident_id} [{row['severity']}] {src_ip}")
+
+            alert_type = alert.get("type", "UNKNOWN")
+            dst_ip     = alert.get("dst_ip", "")
+            _drop      = {"raw_event", "profile_summary", "threat_description", "matched_mitre",
+                          "observation_count", "avg_bytes_per_min", "avg_entropy"}
+            alert_slim = {k: v for k, v in alert.items() if k not in _drop and v not in (None, "")}
+
+            threat_raw, host_raw, rep_raw, recent_raw = await asyncio.gather(
+                self.executor.execute("query_threat_database", {"query": f"{alert_type} {mitre}", "n_results": 3}),
+                self.executor.execute("get_host_profile",      {"ip_address": src_ip}),
+                self.executor.execute("lookup_ip_reputation",  {"ip_address": dst_ip or src_ip}),
+                self.executor.execute("get_recent_alerts",     {"hours": 6, "limit": 5, "src_ip": src_ip, "source": source}),
+            )
+
+            intel_context = (
+                f"Alert: {json.dumps(alert_slim, separators=(',', ':'))}\n\n"
+                f"Intel:\n"
+                f"- Threat DB: {_summarize_result('query_threat_database', threat_raw)}\n"
+                f"- Host profile: {_summarize_result('get_host_profile', host_raw)}\n"
+                f"- IP reputation: {_summarize_result('lookup_ip_reputation', rep_raw)}\n"
+                f"- Recent alerts: {_summarize_result('get_recent_alerts', recent_raw)}"
+            )
+
+            try:
+                response = await self._chat_with_retry(
+                    messages=[{"role": "user", "content": intel_context}],
+                    tools=None, system=ANALYSIS_SYSTEM_PROMPT, max_tokens=768,
+                )
+                raw_text = response.text.strip() if response.text else ""
+            except Exception as llm_err:
+                logger.error(f"LLM unavailable for backlog reinvestigation {incident_id}: {llm_err}")
+                raw_text = json.dumps(self._rule_based_verdict(alert))
+
+            if raw_text.startswith("```"):
+                raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
+                raw_text = re.sub(r"\s*```$", "", raw_text).strip()
+
+            try:
+                verdict = json.loads(raw_text)
+            except (json.JSONDecodeError, ValueError):
+                verdict = self._rule_based_verdict(alert)
+
+            description       = verdict.get("description", "")
+            evidence          = verdict.get("evidence", "")
+            analysis          = f"{description}\n\nEvidence: {evidence}".strip() if evidence else description
+            block_recommended = bool(verdict.get("block_recommended")) or verdict.get("severity") == "CRITICAL"
+            new_title         = verdict.get("title", row["title"])
+            new_severity      = verdict.get("severity", row["severity"])
+            new_mitre         = verdict.get("mitre_techniques", [mitre] if mitre else [])
+
+            async with self.db_pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE incidents SET
+                        title = $2, severity = $3, description = $4,
+                        investigation_summary = $5, mitre_techniques = $6,
+                        block_recommended = $7,
+                        block_target_ip = $8,
+                        updated_at = NOW()
+                    WHERE incident_id = $1
+                """,
+                    incident_id, new_title, new_severity, description, analysis,
+                    new_mitre, block_recommended,
+                    (dst_ip or src_ip) if block_recommended else "",
+                )
+
+            logger.info(f"✅ Backlog upgraded: {incident_id} [{new_severity}] {new_title}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Backlog reinvestigation error: {e}")
+            return False
+
     async def _create_pending_incident(self, alert: Dict):
         """Create a basic PENDING incident when AI investigation is paused.
         Ensures alerts always surface in the Incidents panel, even without AI analysis."""
         try:
-            incident_id = f"INC-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+            incident_id = f"INC-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')[:19]}"
             src_ip  = alert.get("src_ip") or "unknown"
             dst_ip  = alert.get("dst_ip") or ""
             sev     = alert.get("severity", "MEDIUM")
@@ -802,6 +1095,11 @@ class MCPOrchestrator:
                     summary, block_rec, block_target, source,
                 )
             logger.info(f"📋 Pending incident created: {incident_id} [{sev}] {title}")
+            # Fire-and-forget campaign correlation
+            asyncio.ensure_future(_correlate_campaign_with_pool(
+                self.db_pool, incident_id, src_ip, sev, [mitre] if mitre else [],
+                source=source
+            ))
         except Exception as e:
             logger.error(f"Pending incident creation failed: {e}")
 

@@ -140,7 +140,7 @@ class LLMConfig:
 @dataclass
 class DPIConfig:
     interface:              str   = os.getenv("CAPTURE_INTERFACE", "eth0")
-    bpf_filter:             str   = os.getenv("BPF_FILTER", "ip")
+    bpf_filter:             str   = os.getenv("BPF_FILTER", "ip or ip6")
     beacon_avg_interval_sec: float = float(os.getenv("BEACON_AVG_INTERVAL_SEC", "60.0"))
     beacon_std_dev_threshold: float = float(os.getenv("BEACON_STD_DEV", "2.0"))
     entropy_threshold:      float = float(os.getenv("ENTROPY_THRESHOLD", "7.2"))
@@ -173,6 +173,15 @@ class RLMConfig:
 
     # n_results for ChromaDB anomaly query.
     chroma_n_results: int = int(os.getenv("RLM_CHROMA_N_RESULTS", "3"))
+
+    # EMA poisoning detection — max allowed daily drift as a fraction of baseline.
+    # If avg_bytes_per_min rises > 50% in 24h, emit POISONING_SUSPECTED alert.
+    # 0.5 = 50% daily change limit. Set to 0 to disable.
+    ema_poison_max_daily_delta: float = float(os.getenv("RLM_POISON_MAX_DAILY_DELTA", "0.5"))
+
+    # Trend detection — number of consecutive score increases that trigger a
+    # GRADUAL_ESCALATION_DETECTED alert even if no single score crosses the threshold.
+    trend_window: int = int(os.getenv("RLM_TREND_WINDOW", "5"))
 
 
 # ── API Gateway ───────────────────────────────────────────────────────────────

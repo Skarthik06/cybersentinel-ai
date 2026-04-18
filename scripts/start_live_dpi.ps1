@@ -112,7 +112,28 @@ if ($kafkaUp) {
     Write-OK "Stack started."
 }
 
-# STEP 6: Read Redis password from .env
+# STEP 6: Start N8N (auto, no user action needed)
+Write-Step "Starting N8N"
+$n8nRunning = docker ps --filter "name=N8N" --filter "status=running" --format "{{.Names}}" 2>&1
+if ($n8nRunning -eq "N8N") {
+    Write-OK "N8N already running."
+} else {
+    Write-Warn "Starting N8N..."
+    # Ensure network exists then start (or recreate) the container
+    docker network connect cybersentinel-ai_cybersentinel-net N8N 2>&1 | Out-Null
+    docker start N8N 2>&1 | Out-Null
+    Start-Sleep 3
+    $n8nCheck = docker ps --filter "name=N8N" --filter "status=running" --format "{{.Names}}"
+    if ($n8nCheck -eq "N8N") {
+        Write-OK "N8N started at http://localhost:5678"
+    } else {
+        # Container may be stale/missing — recreate it from start_n8n.ps1
+        Write-Warn "N8N container not found — recreating..."
+        & "$PSScriptRoot\start_n8n.ps1"
+    }
+}
+
+# STEP 7: Read Redis password from .env
 $redisPassword = ""
 $envFile = Join-Path $ProjectRoot ".env"
 if (Test-Path $envFile) {
@@ -121,7 +142,7 @@ if (Test-Path $envFile) {
     }
 }
 
-# STEP 7: Show active adapters
+# STEP 8: Show active adapters
 Write-Host ""
 Write-Host "Active network adapters:" -ForegroundColor Cyan
 Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.Name -notlike "vEthernet*" } |

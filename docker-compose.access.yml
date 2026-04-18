@@ -1,0 +1,38 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CyberSentinel AI — Kubernetes access proxy
+#
+# Run this alongside the Kubernetes deployment to get familiar port mappings
+# and "Open in browser" buttons in Docker Desktop's Containers panel.
+#
+#   docker compose -f docker-compose.access.yml up -d
+#   docker compose -f docker-compose.access.yml down
+#
+# Ports exposed (same as Docker Compose dev setup):
+#   Frontend  → http://localhost:5173
+#   API       → http://localhost:8080
+#   Grafana   → http://localhost:3000
+#   Prometheus→ http://localhost:9090
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  cybersentinel-frontend:
+    image: nginx:alpine
+    container_name: cybersentinel-frontend
+    ports:
+      - "5173:80"
+    volumes:
+      - ./configs/nginx-proxy/default.conf:/etc/nginx/conf.d/default.conf:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  cybersentinel-api:
+    image: nginx:alpine
+    container_name: cybersentinel-api
+    ports:
+      - "8080:80"
+    volumes:
+      - ./configs/nginx-proxy/api.conf:/etc/nginx/conf.d/default.conf:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

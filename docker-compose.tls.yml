@@ -1,0 +1,70 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CyberSentinel AI — TLS overlay for docker-compose
+#
+# Mount generated certs from scripts/gen_certs.sh into each service.
+# Apply on top of the base compose file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+#
+# Prerequisites:
+#   ./scripts/gen_certs.sh   (generates certs/ directory)
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+
+  api-gateway:
+    environment:
+      TLS_CERT_FILE: /certs/cert.crt
+      TLS_KEY_FILE:  /certs/cert.key
+      TLS_CA_FILE:   /certs/ca.crt
+    volumes:
+      - ./certs/api-gateway:/certs:ro
+      - ./certs/ca/ca.crt:/certs/ca.crt:ro
+
+  mcp-orchestrator:
+    environment:
+      TLS_CERT_FILE: /certs/cert.crt
+      TLS_KEY_FILE:  /certs/cert.key
+      TLS_CA_FILE:   /certs/ca.crt
+    volumes:
+      - ./certs/mcp-orchestrator:/certs:ro
+      - ./certs/ca/ca.crt:/certs/ca.crt:ro
+
+  rlm-engine:
+    environment:
+      TLS_CERT_FILE: /certs/cert.crt
+      TLS_KEY_FILE:  /certs/cert.key
+      TLS_CA_FILE:   /certs/ca.crt
+    volumes:
+      - ./certs/rlm-engine:/certs:ro
+      - ./certs/ca/ca.crt:/certs/ca.crt:ro
+
+  threat-intel-scraper:
+    volumes:
+      - ./certs/threat-intel-scraper:/certs:ro
+      - ./certs/ca/ca.crt:/certs/ca.crt:ro
+
+  kafka:
+    # Kafka SASL/SSL — requires additional broker config
+    # Uncomment after configuring KAFKA_SSL_* env vars
+    environment:
+      KAFKA_SSL_KEYSTORE_FILENAME: kafka.server.keystore.jks
+      KAFKA_SSL_KEY_CREDENTIALS: kafka_key_creds
+      KAFKA_SSL_KEYSTORE_CREDENTIALS: kafka_keystore_creds
+      KAFKA_SSL_TRUSTSTORE_FILENAME: kafka.server.truststore.jks
+      KAFKA_SSL_TRUSTSTORE_CREDENTIALS: kafka_truststore_creds
+      # Upgrade listener to SSL after generating JKS from PEM:
+      #   openssl pkcs12 -export -in certs/kafka/cert.crt -inkey certs/kafka/cert.key
+      #   keytool -importkeystore -srckeystore kafka.p12 -destkeystore kafka.server.keystore.jks
+    volumes:
+      - ./certs/kafka:/etc/kafka/secrets:ro
+
+  postgres:
+    command: >
+      postgres
+        -c ssl=on
+        -c ssl_cert_file=/certs/cert.crt
+        -c ssl_key_file=/certs/cert.key
+        -c ssl_ca_file=/certs/ca.crt
+    volumes:
+      - ./certs/postgres:/certs:ro
+      - ./certs/ca/ca.crt:/certs/ca.crt:ro

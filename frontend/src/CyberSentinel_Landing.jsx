@@ -143,7 +143,7 @@ export default function LandingPage() {
   }, []);
 
   const termLines = [
-    "INITIALIZING CYBERSENTINEL AI v1.1...",
+    "INITIALIZING CYBERSENTINEL AI v1.3.0...",
     "DPI sensor ONLINE → Npcap [BPF: ip]",
     "RLM engine ONLINE → EMA α=0.1 · ChromaDB ready",
     "MCP orchestrator ONLINE → GPT-4o-mini · 9 tools",
@@ -261,7 +261,7 @@ export default function LandingPage() {
             color:"#E2E8F0",letterSpacing:4 }}>CYBERSENTINEL</span>
           <span style={{ fontFamily:"'Share Tech Mono',monospace",fontSize:9,color:"#4FC3F7",
             background:"rgba(79,195,247,0.08)",border:"1px solid rgba(79,195,247,0.2)",
-            padding:"2px 8px",borderRadius:3,letterSpacing:2 }}>AI v1.1</span>
+            padding:"2px 8px",borderRadius:3,letterSpacing:2 }}>AI v1.3.0</span>
         </div>
         <div style={{ display:"flex",alignItems:"center",gap:28 }}>
           {[["#how-it-works","Pipeline"],["#features","Features"],["#killchain","Kill Chain"],["#integrations","Integrations"],["#stack","Stack"]].map(([href,label]) => (
@@ -305,10 +305,10 @@ export default function LandingPage() {
 
             <p style={{ fontSize:14,color:"#607D8B",lineHeight:1.85,maxWidth:500,
               marginBottom:32,fontFamily:"'DM Sans',sans-serif" }}>
-              Real-time deep packet inspection, autonomous Claude AI-driven threat investigation,
-              MITRE ATT&amp;CK-mapped incident response, and n8n SOAR automation — all unified in
-              a single open-source SOC platform that detects, investigates, and responds without human
-              intervention.
+              Real-time IPv4/IPv6 deep packet inspection, autonomous AI-driven threat investigation
+              (Claude / GPT-4o mini / Gemini), MITRE ATT&amp;CK-mapped incident response, and n8n SOAR
+              automation — unified in a single Kubernetes-deployed SOC platform with human-in-the-loop
+              block approval.
             </p>
 
             <div style={{ display:"flex",gap:14,flexWrap:"wrap",marginBottom:36 }}>
@@ -330,7 +330,7 @@ export default function LandingPage() {
             </div>
 
             <div style={{ display:"flex",gap:10,flexWrap:"wrap" }}>
-              {["10K+ pkt/s DPI","<200ms detection","GPT-4o mini AI","MITRE ATT&CK","n8n SOAR"].map(s => (
+              {["10K+ pkt/s DPI","<1s detection","Claude/GPT-4o/Gemini","MITRE ATT&CK","n8n SOAR"].map(s => (
                 <span key={s} style={{ fontFamily:"'Share Tech Mono',monospace",fontSize:9,color:"#4FC3F7",
                   background:"rgba(79,195,247,0.06)",border:"1px solid rgba(79,195,247,0.15)",
                   padding:"5px 12px",borderRadius:20,letterSpacing:0.5 }}>{s}</span>
@@ -700,9 +700,9 @@ export default function LandingPage() {
                 color:"#E2E8F0",marginBottom:16 }}>Claude AI Autonomous Agents</h3>
               <p style={{ fontSize:13,color:"#607D8B",lineHeight:1.85,marginBottom:22,
                 fontFamily:"'DM Sans',sans-serif" }}>
-                5 specialized MCP agents powered by GPT-4o mini with an agentic investigation loop using
-                9 tools. From alert received to IP blocked and Jira ticket created — fully automated in
-                under 45 seconds, with zero human intervention required.
+                Single-call LLM investigation — all 4 intelligence tools run in parallel via asyncio.gather,
+                results compressed, then one structured prompt sent to Claude / GPT-4o mini / Gemini with
+                tools=None. ~553 tokens per investigation. 5× faster than an agentic tool-calling loop.
               </p>
               <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:8 }}>
                 {[
@@ -1024,16 +1024,16 @@ export default function LandingPage() {
             ]},
             { layer:"L2", label:"INTELLIGENCE",  color:"#00E676", nodes:[
               { icon:"🧠", title:"RLM ENGINE",     sub:"EMA behavioral profiles · α=0.1 low-pass filter" },
-              { icon:"🔍", title:"CHROMADB",       sub:"Vector embeddings · cosine similarity · 3 collections" },
-              { icon:"📊", title:"TIMESCALEDB",    sub:"Hypertable · 30-day retention · continuous aggregates" },
+              { icon:"🔍", title:"CHROMADB",       sub:"Vector embeddings · cosine similarity · 4 collections" },
+              { icon:"📊", title:"POSTGRESQL",     sub:"Incidents · campaigns · audit log · kill chain tracking" },
             ]},
             { layer:"L3", label:"ORCHESTRATION", color:"#FF6D00", nodes:[
-              { icon:"🤖", title:"MCP AGENTS",     sub:"GPT-4o mini · 5 agents · 9 tools · agentic loop" },
+              { icon:"🤖", title:"MCP ORCHESTRATOR", sub:"1-call investigation · ~553 tokens · Claude/GPT-4o/Gemini" },
               { icon:"🔗", title:"KAFKA BRIDGE",   sub:"Routes events → n8n webhooks · dedup filter" },
               { icon:"🛠️", title:"n8n SOAR",        sub:"5 workflows · 11+ integrations · auto-response" },
             ]},
             { layer:"L4", label:"DELIVERY",      color:"#E53935", nodes:[
-              { icon:"🚀", title:"FASTAPI",        sub:"JWT auth · 12 endpoints · Swagger · WebSocket" },
+              { icon:"🚀", title:"FASTAPI",        sub:"JWT auth · REST endpoints · Swagger · Kubernetes" },
               { icon:"📈", title:"GRAFANA",        sub:"Real-time SOC dashboards · Prometheus metrics" },
               { icon:"📣", title:"INTEGRATIONS",   sub:"Slack · PagerDuty · Jira · Teams · ServiceNow" },
             ]},
@@ -1082,14 +1082,14 @@ export default function LandingPage() {
             <div style={{ fontFamily:"'Orbitron',monospace",fontSize:12,fontWeight:700,
               color:"#E2E8F0",letterSpacing:3 }}>CYBERSENTINEL AI</div>
             <div style={{ fontFamily:"'Share Tech Mono',monospace",fontSize:8,
-              color:"#4FC3F7",letterSpacing:2,marginTop:2 }}>AUTONOMOUS SOC PLATFORM v1.1</div>
+              color:"#4FC3F7",letterSpacing:2,marginTop:2 }}>AUTONOMOUS SOC PLATFORM v1.3.0</div>
           </div>
         </div>
         <div style={{ fontFamily:"'Share Tech Mono',monospace",fontSize:10,color:"#3D5465" }}>
-          Capstone 2025 · Built with Claude AI + GPT-4o mini · Open Source
+          Capstone 2026 · Claude / GPT-4o mini / Gemini · Open Source
         </div>
         <div style={{ display:"flex",gap:20 }}>
-          {[["API Docs","http://localhost:8080/docs"],["Dashboard","http://localhost:8080"],["n8n","http://localhost:5678"],["Grafana","http://localhost:3001"]].map(([l,u]) => (
+          {[["API Docs","http://localhost:8080/docs"],["Dashboard","http://localhost:8080"],["n8n","http://localhost:5678"],["Grafana","http://localhost:3000"]].map(([l,u]) => (
             <a key={l} href={u} target="_blank" rel="noopener noreferrer"
               style={{ fontFamily:"'Share Tech Mono',monospace",fontSize:10,
                 color:"#4FC3F7",textDecoration:"none",opacity:0.65,transition:"opacity 0.2s" }}

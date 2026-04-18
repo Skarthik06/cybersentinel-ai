@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, RadarChart, Radar, PolarGrid, PolarAngleAxis } from "recharts";
 
-const API = "http://localhost:8080";
+const API = "";
 
 // ── Mock data for offline demo ─────────────────────────────────────────────
 const MOCK = {
@@ -23,6 +23,11 @@ const MOCK = {
     {incident_id:"INC-002",title:"Data Exfiltration Attempt — 10.0.2.88",severity:"CRITICAL",status:"OPEN",affected_ips:["10.0.2.88"],mitre_techniques:["T1048"],created_at:new Date(Date.now()-3600000).toISOString()},
     {incident_id:"INC-003",title:"Lateral Movement — Finance Subnet",severity:"HIGH",status:"OPEN",affected_ips:["10.0.1.45","10.0.1.200"],mitre_techniques:["T1021.002"],created_at:new Date(Date.now()-1800000).toISOString()},
     {incident_id:"INC-004",title:"DGA Malware Activity — 10.0.1.23",severity:"HIGH",status:"RESOLVED",affected_ips:["10.0.1.23"],mitre_techniques:["T1568.002"],created_at:new Date(Date.now()-86400000).toISOString()},
+  ],
+  campaigns: [
+    {campaign_id:"CAMP-001",src_ip:"10.0.0.55",max_severity:"CRITICAL",incident_count:4,first_seen:new Date(Date.now()-18000000).toISOString(),last_seen:new Date(Date.now()-120000).toISOString(),mitre_stages:["T1190","T1059.004","T1071.001","T1041"],campaign_summary:"Multi-stage intrusion: initial exploitation via public-facing application, followed by C2 beacon establishment and data exfiltration."},
+    {campaign_id:"CAMP-002",src_ip:"10.0.2.88",max_severity:"CRITICAL",incident_count:3,first_seen:new Date(Date.now()-14400000).toISOString(),last_seen:new Date(Date.now()-900000).toISOString(),mitre_stages:["T1046","T1021.002","T1048"],campaign_summary:"Reconnaissance scan escalated to lateral movement across Finance subnet with attempted data exfiltration."},
+    {campaign_id:"CAMP-003",src_ip:"192.168.5.10",max_severity:"HIGH",incident_count:2,first_seen:new Date(Date.now()-7200000).toISOString(),last_seen:new Date(Date.now()-3600000).toISOString(),mitre_stages:["T1110.003","T1078"],campaign_summary:"Credential access attempt via password spraying. One account may be compromised."},
   ],
 };
 
@@ -316,6 +321,7 @@ export default function SOCDashboard() {
   const [wfStatus, setWfStatus] = useState({}); // { wfId: "idle"|"running"|"done"|"error" }
   const [pendingReports, setPendingReports] = useState([]);
   const [reportAction, setReportAction] = useState({}); // { reportId: "approving"|"denying"|"done"|"error" }
+  const [campaigns, setCampaigns] = useState([]);
   const waterCanvasRef = useRef(null);
 
   // Water mosaic animation (login screen only)
@@ -420,7 +426,10 @@ export default function SOCDashboard() {
     const src = mode || activeMode;
     try {
       const r = await fetch(`${API}/api/v1/block-recommendations?source=${src}`, { headers:{ Authorization:`Bearer ${token}` } });
-      if (r.ok) setBlockRecs(await r.json());
+      if (r.ok) {
+        const recs = await r.json();
+        setBlockRecs(recs.filter(rec => rec.investigation_summary && !rec.investigation_summary.startsWith('⏸')));
+      }
     } catch {}
   }, [token, activeMode]);
 
@@ -443,6 +452,16 @@ export default function SOCDashboard() {
     } catch {}
   }, [token]);
   useEffect(() => { if (authed) { fetchPendingReports(); const t = setInterval(fetchPendingReports, 20000); return ()=>clearInterval(t); } }, [authed, fetchPendingReports]);
+
+  const fetchCampaigns = useCallback(async (mode) => {
+    if (!token) return;
+    const src = mode || activeMode;
+    try {
+      const r = await fetch(`${API}/api/v1/campaigns?source=${src}`, { headers:{ Authorization:`Bearer ${token}` } });
+      if (r.ok) setCampaigns(await r.json());
+    } catch {}
+  }, [token, activeMode]);
+  useEffect(() => { if (authed) { fetchCampaigns(); const t = setInterval(fetchCampaigns, 30000); return ()=>clearInterval(t); } }, [authed, fetchCampaigns]);
 
   async function login() {
     setLoading(true); setLoginError("");
@@ -674,7 +693,7 @@ export default function SOCDashboard() {
             <span className="holo-title" style={{ fontFamily:"'Orbitron',monospace",fontSize:9,
               letterSpacing:3,fontWeight:700 }}>SECURE ACCESS TERMINAL</span>
             <span style={{ marginLeft:"auto",fontFamily:"monospace",fontSize:7,
-              color:"rgba(0,176,255,0.4)",letterSpacing:1 }}>v1.1</span>
+              color:"rgba(0,176,255,0.4)",letterSpacing:1 }}>v1.3.0</span>
           </div>
           <div style={{ position:"relative",zIndex:5,padding:"22px 24px 20px" }}>
             {/* Security stats */}
@@ -825,9 +844,11 @@ export default function SOCDashboard() {
                 setGeneratedRemediation(null);
                 setBlockRecs([]);
                 setFirewallRules([]);
+                setCampaigns([]);
                 fetchData(token, mode);
                 fetchBlockRecs(mode);
                 fetchFirewallRules();
+                fetchCampaigns();
               }} style={{
                 padding:"5px 22px", border:"none", borderRadius:6, cursor:"pointer",
                 background: isActive ? `${accent}22` : "transparent",
@@ -864,7 +885,7 @@ export default function SOCDashboard() {
           <span style={{ fontFamily:"'Rajdhani',sans-serif", fontSize:17, fontWeight:700, letterSpacing:2, color:"#E2E8F0" }}>CYBERSENTINEL</span>
           <span style={{ fontFamily:"monospace", fontSize:9, color:ACCENT_LITE, background:`${ACCENT_LITE}18`, padding:"2px 8px", borderRadius:3, letterSpacing:2 }}>{MODE_ICON} {MODE_LABEL}</span>
           <div style={{ display:"flex", gap:1, marginLeft:8 }}>
-            {[["overview","◉ OVERVIEW"],["alerts","⚡ ALERTS"],["incidents","🚨 INCIDENTS"],["response","🛡️ RESPONSE"],["intel","🔍 THREAT INTEL"],["hosts","💻 HOSTS"],["threatfeed","📡 THREAT FEED"],["automation","⚙ AUTOMATION"]].map(([k,l]) => (
+            {[["overview","◉ OVERVIEW"],["alerts","⚡ ALERTS"],["incidents","🚨 INCIDENTS"],["campaigns","⚔ CAMPAIGNS"],["response","🛡️ RESPONSE"],["intel","🔍 THREAT INTEL"],["hosts","💻 HOSTS"],["threatfeed","📡 THREAT FEED"],["automation","⚙ AUTOMATION"]].map(([k,l]) => (
               <button key={k} onClick={()=>setTab(k)} style={{
                 padding:"6px 14px", border:"none", background: tab===k?`${ACCENT}22`:"transparent",
                 color: tab===k?ACCENT_LITE:"#546E7A", fontFamily:"'Share Tech Mono',monospace", fontSize:10,
@@ -879,6 +900,9 @@ export default function SOCDashboard() {
                 {k==="threatfeed" && (data.alerts||[]).length > 0 && (
                   <span style={{ marginLeft:6, background:ACCENT, color:"#fff", fontSize:9, fontWeight:700, padding:"1px 5px", borderRadius:8, verticalAlign:"middle" }}>{(data.alerts||[]).length}</span>
                 )}
+                {k==="campaigns" && campaigns.filter(c=>c.max_severity==="CRITICAL").length > 0 && (
+                  <span style={{ marginLeft:6, background:"#E53935", color:"#fff", fontSize:9, fontWeight:700, padding:"1px 5px", borderRadius:8, verticalAlign:"middle" }}>{campaigns.filter(c=>c.max_severity==="CRITICAL").length}</span>
+                )}
                 {k==="automation" && pendingReports.length > 0 && (
                   <span style={{ marginLeft:6, background:"#E53935", color:"#fff", fontSize:9, fontWeight:700, padding:"1px 5px", borderRadius:8, verticalAlign:"middle" }}>{pendingReports.length}</span>
                 )}
@@ -891,17 +915,28 @@ export default function SOCDashboard() {
             <ThreatDot color={apiLive?"#00E676":"#FF6D00"} size={5}/>
             <span style={{ color:apiLive?"#00E676":"#FF6D00" }}>{apiLive?"LIVE API":"CONNECTING..."}</span>
           </div>
-          {/* Per-source AI investigation toggle */}
+          {/* ── AI INVESTIGATION CONTROLS — SIM / DPI ── */}
           {apiLive && (
-            <button onClick={()=>toggleInvestigations(activeMode)} style={{
-              padding:"3px 10px", border:`1px solid ${invPaused?"#546E7A":"#00E676"}`,
-              borderRadius:4, background:invPaused?"rgba(84,110,122,0.15)":"rgba(0,230,118,0.1)",
-              color:invPaused?"#546E7A":"#00E676",
-              fontFamily:"'Share Tech Mono',monospace", fontSize:9, letterSpacing:1,
-              cursor:"pointer", transition:"all 0.2s",
-            }}>
-              {invPaused?"▶ AI INVEST OFF":"⏸ AI INVEST ON"}
-            </button>
+            <div style={{ display:"flex", alignItems:"center", gap:5 }}>
+              <span style={{ fontFamily:"monospace", fontSize:9, color:"#546E7A", letterSpacing:1 }}>AI INV:</span>
+              {[["simulator","SIM"],["dpi","DPI"]].map(([src, label]) => {
+                const paused = investigationsPaused[src] ?? false;
+                return (
+                  <button key={src} onClick={()=>toggleInvestigations(src)}
+                    title={`${paused?"Resume":"Pause"} AI investigations for ${src}`}
+                    style={{
+                      padding:"3px 9px", borderRadius:4,
+                      border:`1px solid ${paused?"#546E7A":"#4FC3F7"}`,
+                      background:paused?"rgba(84,110,122,0.12)":"rgba(79,195,247,0.08)",
+                      color:paused?"#546E7A":"#4FC3F7",
+                      fontFamily:"'Share Tech Mono',monospace", fontSize:9, letterSpacing:1,
+                      cursor:"pointer", transition:"all 0.2s",
+                    }}>
+                    {paused?"▶":"⏸"} {label}
+                  </button>
+                );
+              })}
+            </div>
           )}
           <span style={{ color:"#546E7A" }}>|</span>
           <span style={{ color:"#4FC3F7" }}>{dateStr}</span>
@@ -914,17 +949,20 @@ export default function SOCDashboard() {
         </div>
       </div>
 
-      {/* INVESTIGATIONS PAUSED BANNER */}
-      {apiLive && invPaused && (
-        <div style={{
-          background:"rgba(84,110,122,0.12)", borderBottom:"1px solid rgba(84,110,122,0.3)",
-          padding:"6px 20px", display:"flex", alignItems:"center", gap:10,
-          fontFamily:"'Share Tech Mono',monospace", fontSize:10, color:"#78909C", letterSpacing:1,
-        }}>
-          <span>⏸</span>
-          <span>AI INVESTIGATIONS PAUSED [{MODE_LABEL}] — Alerts are logged but no AI calls are being made. Click <strong style={{color:"#B0BEC5"}}>AI INVEST OFF</strong> in the top bar to resume.</span>
-        </div>
-      )}
+      {/* STATUS BANNERS */}
+      {apiLive && (investigationsPaused.simulator || investigationsPaused.dpi) && (() => {
+        const pausedSources = [investigationsPaused.simulator && "SIM", investigationsPaused.dpi && "DPI"].filter(Boolean).join(" + ");
+        return (
+          <div style={{
+            background:"rgba(84,110,122,0.12)", borderBottom:"1px solid rgba(84,110,122,0.3)",
+            padding:"6px 20px", display:"flex", alignItems:"center", gap:10,
+            fontFamily:"'Share Tech Mono',monospace", fontSize:10, color:"#78909C", letterSpacing:1,
+          }}>
+            <span>⏸</span>
+            <span>AI INVESTIGATIONS PAUSED [{pausedSources}] — Alerts are logged but no AI analysis. Use <strong style={{color:"#B0BEC5"}}>▶ SIM / ▶ DPI</strong> to resume.</span>
+          </div>
+        );
+      })()}
 
       {/* CONTENT */}
       <div key={tab} className="tab-content" style={{ flex:1, padding:16, overflow:"auto" }}>
@@ -1178,6 +1216,100 @@ export default function SOCDashboard() {
           );
         })()}
 
+        {/* ── CAMPAIGNS TAB ── */}
+        {tab==="campaigns" && (() => {
+          const campData = apiLive ? campaigns : MOCK.campaigns;
+          const TACTIC_MAP = {
+            "T1190":    { tactic:"Initial Access",    phase:0, icon:"🚪" },
+            "T1059.004":{ tactic:"Execution",         phase:1, icon:"⚡" },
+            "T1027":    { tactic:"Defense Evasion",   phase:2, icon:"🕵️" },
+            "T1110.001":{ tactic:"Credential Access", phase:3, icon:"🔑" },
+            "T1110.003":{ tactic:"Credential Access", phase:3, icon:"🔑" },
+            "T1078":    { tactic:"Credential Access", phase:3, icon:"🔑" },
+            "T1046":    { tactic:"Discovery",         phase:4, icon:"🔍" },
+            "T1595":    { tactic:"Discovery",         phase:4, icon:"🔍" },
+            "T1021.001":{ tactic:"Lateral Movement",  phase:5, icon:"↔️" },
+            "T1021.002":{ tactic:"Lateral Movement",  phase:5, icon:"↔️" },
+            "T1071.001":{ tactic:"C2",                phase:6, icon:"📡" },
+            "T1071.004":{ tactic:"C2",                phase:6, icon:"📡" },
+            "T1572":    { tactic:"C2",                phase:6, icon:"📡" },
+            "T1048":    { tactic:"Exfiltration",      phase:7, icon:"📤" },
+            "T1041":    { tactic:"Exfiltration",      phase:7, icon:"📤" },
+            "T1048.003":{ tactic:"Exfiltration",      phase:7, icon:"📤" },
+            "T1568.002":{ tactic:"C2",                phase:6, icon:"📡" },
+            "T1003":    { tactic:"Credential Access", phase:3, icon:"🔑" },
+          };
+          const CHAIN_LABELS = ["Initial Access","Execution","Defense Evasion","Credential Access","Discovery","Lateral Movement","C2","Exfiltration"];
+          const critCount = campData.filter(c=>c.max_severity==="CRITICAL").length;
+          const last24h = campData.filter(c=>(Date.now()-new Date(c.last_seen).getTime())<86400000).length;
+          const SEV_COLOR = { CRITICAL:"#E53935", HIGH:"#FF6D00", MEDIUM:"#FFD740", LOW:"#66BB6A" };
+          return (
+            <div>
+              {/* Stats row */}
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12, marginBottom:16 }}>
+                <MetricCard label="Total Campaigns" value={campData.length} color={ACCENT} icon="⚔"/>
+                <MetricCard label="Critical Campaigns" value={critCount} color="#E53935" live={critCount>0} icon="🔴"/>
+                <MetricCard label="Active (Last 24h)" value={last24h} color="#FF6D00" icon="🕐"/>
+              </div>
+              {campData.length === 0 ? (
+                <div style={{ textAlign:"center", padding:60, color:"#546E7A", fontFamily:"monospace", fontSize:12 }}>
+                  No active attack campaigns detected
+                </div>
+              ) : (
+                <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+                  {campData.map(c => {
+                    const activePhases = new Set((c.mitre_stages||[]).map(t => (TACTIC_MAP[t]||{}).phase).filter(p=>p!=null));
+                    return (
+                      <Panel key={c.campaign_id}>
+                        <div style={{ padding:"14px 18px" }}>
+                          {/* Header row */}
+                          <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:10 }}>
+                            <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:11, color:ACCENT_LITE, fontWeight:700 }}>{c.campaign_id}</span>
+                            <span style={{ background:`${SEV_COLOR[c.max_severity]||"#546E7A"}22`, color:SEV_COLOR[c.max_severity]||"#546E7A", border:`1px solid ${SEV_COLOR[c.max_severity]||"#546E7A"}55`, padding:"1px 8px", borderRadius:4, fontSize:10, fontFamily:"'Share Tech Mono',monospace", fontWeight:700 }}>{c.max_severity}</span>
+                            <span style={{ fontFamily:"monospace", fontSize:11, color:"#E2E8F0" }}>SRC: <span style={{ color:ACCENT_LITE }}>{c.src_ip}</span></span>
+                            <span style={{ marginLeft:"auto", fontFamily:"monospace", fontSize:10, color:"#546E7A" }}>{c.incident_count} incident{c.incident_count!==1?"s":""}</span>
+                          </div>
+                          {/* Kill chain strip */}
+                          <div style={{ display:"flex", gap:3, marginBottom:10 }}>
+                            {CHAIN_LABELS.map((label,phase) => {
+                              const hit = activePhases.has(phase);
+                              return (
+                                <div key={phase} title={label} style={{ flex:1, textAlign:"center", padding:"3px 2px", borderRadius:4, fontSize:9, fontFamily:"'Share Tech Mono',monospace", letterSpacing:0,
+                                  background: hit ? (phase<=2?"rgba(229,57,53,0.25)":phase<=5?"rgba(255,109,0,0.25)":"rgba(0,176,255,0.25)") : "rgba(255,255,255,0.04)",
+                                  color: hit ? (phase<=2?"#EF9A9A":phase<=5?"#FFCC80":"#81D4FA") : "#37474F",
+                                  border: hit ? `1px solid ${phase<=2?"rgba(229,57,53,0.5)":phase<=5?"rgba(255,109,0,0.5)":"rgba(0,176,255,0.5)"}` : "1px solid rgba(255,255,255,0.04)",
+                                  fontWeight: hit ? 700 : 400,
+                                }}>
+                                  {CHAIN_LABELS[phase].split(" ").map(w=>w[0]).join("")}
+                                </div>
+                              );
+                            })}
+                          </div>
+                          {/* MITRE tags */}
+                          <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:8 }}>
+                            {(c.mitre_stages||[]).map(t => (
+                              <span key={t} style={{ background:"rgba(0,176,255,0.1)", color:"#4FC3F7", border:"1px solid rgba(0,176,255,0.25)", padding:"1px 7px", borderRadius:3, fontSize:9, fontFamily:"monospace" }}>{t}</span>
+                            ))}
+                          </div>
+                          {/* Summary */}
+                          {c.campaign_summary && (
+                            <div style={{ fontFamily:"'Rajdhani',sans-serif", fontSize:12, color:"#90A4AE", lineHeight:1.5, marginBottom:8 }}>{c.campaign_summary}</div>
+                          )}
+                          {/* Timestamps */}
+                          <div style={{ display:"flex", gap:24, fontFamily:"monospace", fontSize:10, color:"#546E7A" }}>
+                            <span>FIRST: {new Date(c.first_seen).toLocaleString()}</span>
+                            <span>LAST: {new Date(c.last_seen).toLocaleString()}</span>
+                          </div>
+                        </div>
+                      </Panel>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
         {/* ── RESPONSE TAB ── */}
         {tab==="response" && (
           <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
@@ -1189,14 +1321,19 @@ export default function SOCDashboard() {
 
             {/* ── ACTIVE INCIDENTS PANEL ── */}
             {(() => {
-              const openInc = (data.incidents||[]).filter(i => i.status === 'OPEN');
+              const allOpen  = (data.incidents||[]).filter(i => i.status === 'OPEN');
+              const openInc  = allOpen.filter(i => i.investigation_summary && !i.investigation_summary?.startsWith('⏸'));
+              const pendingCount = allOpen.length - openInc.length;
               return (
                 <div className="dash-panel panel-in" style={{ background:"rgba(7,16,27,0.8)", backdropFilter:"blur(12px)", border:"1px solid rgba(255,215,64,0.15)", borderRadius:12, overflow:"hidden" }}>
                   <div style={{ padding:"12px 18px", borderBottom:"1px solid rgba(255,215,64,0.1)", background:"rgba(255,215,64,0.03)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
-                    <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
                       {openInc.length > 0 && <ThreatDot color="#FFD740" size={5}/>}
-                      <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:10, color:"#FFD740", letterSpacing:2 }}>ACTIVE INCIDENTS</span>
+                      <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:10, color:"#FFD740", letterSpacing:2 }}>ACTIVE INCIDENTS — AI INVESTIGATED</span>
                       <span style={{ fontFamily:"monospace", fontSize:10, color:"#FFD740", background:"rgba(255,215,64,0.1)", padding:"2px 10px", borderRadius:10, border:"1px solid rgba(255,215,64,0.25)" }}>{openInc.length} OPEN</span>
+                      {pendingCount > 0 && (
+                        <span style={{ fontFamily:"monospace", fontSize:9, color:"#546E7A", background:"rgba(255,215,64,0.05)", padding:"2px 8px", borderRadius:10, border:"1px solid rgba(255,215,64,0.12)" }}>+{pendingCount} pending AI → see Incidents tab</span>
+                      )}
                     </div>
                     <button onClick={()=>setTab("incidents")} style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:9, color:"#4FC3F7", background:"rgba(79,195,247,0.06)", border:"1px solid rgba(79,195,247,0.2)", borderRadius:4, padding:"3px 10px", cursor:"pointer", letterSpacing:1 }}>
                       VIEW ALL →
@@ -1400,34 +1537,39 @@ export default function SOCDashboard() {
 
         {/* ── INCIDENTS TAB ── */}
         {tab==="incidents" && (() => {
-          const allInc = apiLive ? (data.incidents||[]) : MOCK.incidents;
-          const unknownInc = allInc.filter(i => !i.mitre_techniques?.length || i.mitre_techniques.includes("UNKNOWN"));
-          const knownInc   = allInc.filter(i => i.mitre_techniques?.length && !i.mitre_techniques.includes("UNKNOWN"));
+          const allInc        = apiLive ? (data.incidents||[]) : MOCK.incidents;
+          const pendingInc    = allInc.filter(i => !i.investigation_summary || i.investigation_summary?.startsWith('⏸'));
+          const investigatedInc = allInc.filter(i => i.investigation_summary && !i.investigation_summary?.startsWith('⏸'));
 
-          function IncCard({ inc }) {
+          function IncCard({ inc, pending=false }) {
             const isUnknown = !inc.mitre_techniques?.length || inc.mitre_techniques.includes("UNKNOWN");
-            const border = isUnknown ? "rgba(255,109,0,0.4)" : `${STATUS_COLOR[inc.status]||"#546E7A"}30`;
-            const accent = isUnknown ? "#FF6D00" : (STATUS_COLOR[inc.status]||"#546E7A");
+            const border = pending ? "rgba(255,215,64,0.35)" : isUnknown ? "rgba(255,109,0,0.4)" : `${STATUS_COLOR[inc.status]||"#546E7A"}30`;
+            const accent = pending ? "#FFD740" : isUnknown ? "#FF6D00" : (STATUS_COLOR[inc.status]||"#546E7A");
+            const bgDefault = pending ? "rgba(255,215,64,0.03)" : isUnknown ? "rgba(255,109,0,0.04)" : "rgba(5,13,21,0.6)";
+            const bgHover   = pending ? "rgba(255,215,64,0.07)" : isUnknown ? "rgba(255,109,0,0.08)" : "rgba(79,195,247,0.08)";
             return (
               <div
                 onClick={() => openIncidentDrawer(inc)}
                 style={{
-                  background: isUnknown ? "rgba(255,109,0,0.04)" : "rgba(5,13,21,0.6)",
+                  background: bgDefault,
                   border:`1px solid ${border}`,
                   borderLeft:`3px solid ${accent}`,
                   borderRadius:8, padding:"16px 20px",
                   transition:"all 0.2s", cursor:"pointer",
                 }}
-                onMouseEnter={e=>e.currentTarget.style.background=isUnknown?"rgba(255,109,0,0.08)":"rgba(79,195,247,0.08)"}
-                onMouseLeave={e=>e.currentTarget.style.background=isUnknown?"rgba(255,109,0,0.04)":"rgba(5,13,21,0.6)"}>
+                onMouseEnter={e=>e.currentTarget.style.background=bgHover}
+                onMouseLeave={e=>e.currentTarget.style.background=bgDefault}>
                 <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:10 }}>
                   <div>
                     <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6, flexWrap:"wrap" }}>
                       <span style={{ fontFamily:"monospace", fontSize:10, color:"#546E7A" }}>{inc.incident_id}</span>
                       <SevBadge s={inc.severity}/>
                       <span style={{ fontFamily:"monospace", fontSize:10, color:STATUS_COLOR[inc.status], background:`${STATUS_COLOR[inc.status]}18`, padding:"2px 8px", borderRadius:3, border:`1px solid ${STATUS_COLOR[inc.status]}40`, letterSpacing:1 }}>{inc.status}</span>
-                      {isUnknown && (
-                        <span style={{ fontFamily:"monospace", fontSize:9, color:"#FF6D00", background:"rgba(255,109,0,0.12)", padding:"2px 8px", borderRadius:3, border:"1px solid rgba(255,109,0,0.3)", letterSpacing:1, animation:"pulse 2s infinite" }}>UNKNOWN THREAT</span>
+                      {pending && (
+                        <span style={{ fontFamily:"monospace", fontSize:9, color:"#FFD740", background:"rgba(255,215,64,0.12)", padding:"2px 8px", borderRadius:3, border:"1px solid rgba(255,215,64,0.35)", letterSpacing:1, animation:"pulse 2s infinite" }}>⏸ AWAITING AI</span>
+                      )}
+                      {!pending && isUnknown && (
+                        <span style={{ fontFamily:"monospace", fontSize:9, color:"#FF6D00", background:"rgba(255,109,0,0.12)", padding:"2px 8px", borderRadius:3, border:"1px solid rgba(255,109,0,0.3)", letterSpacing:1 }}>UNKNOWN THREAT</span>
                       )}
                     </div>
                     <div style={{ fontSize:13, color:"#E2E8F0", fontWeight:500 }}>{inc.title}</div>
@@ -1441,18 +1583,21 @@ export default function SOCDashboard() {
                   </div>
                   <div style={{ fontSize:11, color:"#8899AA" }}>
                     <span style={{ color:"#546E7A" }}>MITRE: </span>
-                    {isUnknown
+                    {isUnknown && !inc.investigation_summary
                       ? <span style={{ color:"#FF6D00" }}>AI CLASSIFYING — no technique mapped</span>
                       : (inc.mitre_techniques||[]).map(m => <span key={m} style={{ color:"#FFD740", marginRight:8, fontFamily:"monospace" }}>{m}</span>)
                     }
                   </div>
                 </div>
-                {inc.investigation_summary && (
+                {!pending && inc.investigation_summary && (
                   <div style={{ fontSize:10, color:"#8899AA", fontFamily:"monospace", background:"rgba(5,13,21,0.5)", border:"1px solid rgba(79,195,247,0.08)", borderRadius:4, padding:"6px 10px", maxHeight:44, overflow:"hidden", lineHeight:1.6, marginBottom:6 }}>
                     {inc.investigation_summary.substring(0,160)}{inc.investigation_summary.length>160?"…":""}
                   </div>
                 )}
-                <div style={{ fontSize:10, color:"#38516A", fontFamily:"monospace" }}>click to investigate →</div>
+                {pending && (
+                  <div style={{ fontSize:10, color:"#6B7280", fontFamily:"monospace", fontStyle:"italic" }}>AI investigation queued — will appear in Response panel once complete</div>
+                )}
+                {!pending && <div style={{ fontSize:10, color:"#38516A", fontFamily:"monospace" }}>click to investigate →</div>}
               </div>
             );
           }
@@ -1460,50 +1605,56 @@ export default function SOCDashboard() {
           return (
             <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
               {/* Status metric row */}
-              <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:12 }}>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(6,1fr)", gap:12 }}>
                 {Object.entries(STATUS_COLOR).map(([s,c]) => (
                   <MetricCard key={s} label={s} icon="" color={c}
                     value={allInc.filter(i=>i.status===s).length}
                     sub={`${s.toLowerCase()}`}/>
                 ))}
-                <MetricCard label="Unknown Threats" color="#FF6D00" value={unknownInc.length} live={unknownInc.length>0} icon="❓"/>
+                <MetricCard label="AI Investigated" color="#4FC3F7" value={investigatedInc.length} icon="✓"/>
+                <MetricCard label="Pending AI" color="#FFD740" value={pendingInc.length} live={pendingInc.length>0} icon="⏸"/>
               </div>
 
-              {/* Unknown incidents — top priority */}
-              {unknownInc.length > 0 && (
-                <div>
-                  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
-                    <ThreatDot color="#FF6D00" size={5}/>
-                    <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:11, color:"#FF6D00", letterSpacing:2 }}>UNKNOWN THREAT INCIDENTS — AI CLASSIFICATION REQUIRED</span>
-                    <span style={{ marginLeft:"auto", fontFamily:"monospace", fontSize:9, color:"#546E7A" }}>{unknownInc.length} unclassified</span>
-                  </div>
-                  <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-                    {unknownInc.map(inc => <IncCard key={inc.incident_id} inc={inc}/>)}
-                  </div>
+              {/* ── PENDING AI INVESTIGATION ── */}
+              <div className="dash-panel" style={{ background:"rgba(7,16,27,0.8)", backdropFilter:"blur(12px)", border:`1px solid ${pendingInc.length>0?"rgba(255,215,64,0.2)":"rgba(79,195,247,0.08)"}`, borderRadius:12, overflow:"hidden" }}>
+                <div style={{ padding:"12px 18px", borderBottom:`1px solid ${pendingInc.length>0?"rgba(255,215,64,0.12)":"rgba(79,195,247,0.06)"}`, background: pendingInc.length>0?"rgba(255,215,64,0.03)":"transparent", display:"flex", alignItems:"center", gap:10 }}>
+                  {pendingInc.length > 0 && <ThreatDot color="#FFD740" size={5}/>}
+                  <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:10, color:"#FFD740", letterSpacing:2 }}>PENDING AI INVESTIGATION</span>
+                  <span style={{ fontFamily:"monospace", fontSize:10, color:"#FFD740", background:"rgba(255,215,64,0.1)", padding:"2px 10px", borderRadius:10, border:"1px solid rgba(255,215,64,0.25)" }}>{pendingInc.length} queued</span>
+                  <span style={{ marginLeft:"auto", fontFamily:"monospace", fontSize:9, color:"#546E7A" }}>not visible in Response panel until AI investigated</span>
                 </div>
-              )}
+                <div style={{ padding:16, display:"flex", flexDirection:"column", gap:10 }}>
+                  {pendingInc.length === 0 ? (
+                    <div style={{ textAlign:"center", color:"#546E7A", fontFamily:"monospace", fontSize:11, padding:"20px 0" }}>
+                      ✅ No pending incidents — all incidents have been AI investigated
+                    </div>
+                  ) : pendingInc.map(inc => <IncCard key={inc.incident_id} inc={inc} pending={true}/>)}
+                </div>
+              </div>
 
-              {/* Separator */}
-              {unknownInc.length > 0 && knownInc.length > 0 && (
-                <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-                  <div style={{ flex:1, height:1, background:"rgba(79,195,247,0.08)" }}/>
-                  <span style={{ fontFamily:"monospace", fontSize:9, color:"#546E7A", letterSpacing:2 }}>MITRE ATT&CK MAPPED INCIDENTS</span>
-                  <div style={{ flex:1, height:1, background:"rgba(79,195,247,0.08)" }}/>
+              {/* ── AI INVESTIGATED ── */}
+              <div className="dash-panel" style={{ background:"rgba(7,16,27,0.8)", backdropFilter:"blur(12px)", border:"1px solid rgba(79,195,247,0.12)", borderRadius:12, overflow:"hidden" }}>
+                <div style={{ padding:"12px 18px", borderBottom:"1px solid rgba(79,195,247,0.08)", background:"rgba(79,195,247,0.02)", display:"flex", alignItems:"center", gap:10 }}>
+                  <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:10, color:"#4FC3F7", letterSpacing:2 }}>AI INVESTIGATED</span>
+                  <span style={{ fontFamily:"monospace", fontSize:10, color:"#4FC3F7", background:"rgba(79,195,247,0.1)", padding:"2px 10px", borderRadius:10, border:"1px solid rgba(79,195,247,0.25)" }}>{investigatedInc.length} incidents</span>
+                  <span style={{ marginLeft:"auto", fontFamily:"monospace", fontSize:9, color:"#546E7A" }}>these appear in Response panel</span>
                 </div>
-              )}
-
-              {/* Known incidents */}
-              {allInc.length === 0 ? (
-                <div className="dash-panel" style={{ background:"rgba(7,16,27,0.8)", backdropFilter:"blur(12px)", border:"1px solid rgba(79,195,247,0.1)", borderRadius:12, padding:"50px 0", textAlign:"center", color:"#546E7A", fontFamily:"monospace", fontSize:12 }}>
-                  {invPaused
-                    ? "AI investigations paused — enable via top bar toggle"
-                    : "No incidents yet — AI investigation creates incidents after each alert (every 60s)"}
+                <div style={{ padding:16, display:"flex", flexDirection:"column", gap:10 }}>
+                  {allInc.length === 0 ? (
+                    <div style={{ textAlign:"center", color:"#546E7A", fontFamily:"monospace", fontSize:11, padding:"20px 0" }}>
+                      {invPaused
+                        ? "AI investigations paused — enable via top bar toggle"
+                        : "No incidents yet — AI investigation creates incidents after each alert"}
+                    </div>
+                  ) : investigatedInc.length === 0 ? (
+                    <div style={{ textAlign:"center", color:"#546E7A", fontFamily:"monospace", fontSize:11, padding:"20px 0" }}>
+                      AI is processing — investigated incidents will appear here
+                    </div>
+                  ) : (
+                    investigatedInc.map(inc => <IncCard key={inc.incident_id} inc={inc} pending={false}/>)
+                  )}
                 </div>
-              ) : (
-                <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-                  {knownInc.map(inc => <IncCard key={inc.incident_id} inc={inc}/>)}
-                </div>
-              )}
+              </div>
             </div>
           );
         })()}
@@ -2756,10 +2907,11 @@ export default function SOCDashboard() {
             <span key={s}><span style={{color:"#38516A"}}>{s}: </span><span style={{color:c}}>{st}</span></span>
           ))}
         </div>
-        <div>CyberSentinel AI v1.0 · Capstone 2025 · {authed&&token?"Authenticated":""}</div>
+        <div>CyberSentinel AI v1.3.0 · Capstone 2026 · {authed&&token?"Authenticated":""}</div>
         <div style={{ display:"flex", gap:16 }}>
           <span>Alerts: <span style={{color:"#4FC3F7"}}>{apiLive?(data.alerts?.length??0):8}</span></span>
           <span>Incidents: <span style={{color:"#FFD740"}}>{apiLive?(data.incidents?.length??0):4}</span></span>
+          <span>Campaigns: <span style={{color:"#EF9A9A"}}>{apiLive?campaigns.length:MOCK.campaigns.length}</span></span>
           <span>Risk: <span style={{color:riskColor}}>{riskPct}%</span></span>
         </div>
       </div>

@@ -45,6 +45,17 @@ logger = get_logger("rlm-engine")
 POSTGRES_URL = os.getenv("POSTGRES_URL")
 REDIS_URL    = os.getenv("REDIS_URL", "redis://redis:6379")
 
+# ── Kafka SASL/SCRAM-SHA-256 (optional — activated only when KAFKA_SASL_PASSWORD is set) ──
+_KAFKA_SASL_USERNAME = os.getenv("KAFKA_SASL_USERNAME", "")
+_KAFKA_SASL_PASSWORD = os.getenv("KAFKA_SASL_PASSWORD", "")
+_KAFKA_SASL_KWARGS: dict = (
+    {"security_protocol": "SASL_PLAINTEXT",
+     "sasl_mechanism": "SCRAM-SHA-256",
+     "sasl_plain_username": _KAFKA_SASL_USERNAME,
+     "sasl_plain_password": _KAFKA_SASL_PASSWORD}
+    if _KAFKA_SASL_PASSWORD else {}
+)
+
 
 # ── BehaviorProfile ───────────────────────────────────────────────────────────
 @dataclass
@@ -79,6 +90,10 @@ class BehaviorProfile:
     context_window: deque = field(
         default_factory=lambda: deque(maxlen=rlm_cfg.context_window_size)
     )
+
+    # Rolling anomaly score history — used for gradual escalation / trend detection.
+    # Stores raw floats; maxlen=24 covers ~24 scoring passes per host.
+    score_history: deque = field(default_factory=lambda: deque(maxlen=24))
 
     def to_text(self) -> str:
         """
@@ -117,6 +132,57 @@ class BehaviorProfile:
         )
 
 
+# ── IsolationForest sequence layer ───────────────────────────────────────────
+class SequenceAnomalyDetector:
+    """
+    Lightweight IsolationForest layer over per-entity anomaly score history.
+
+    Detects anomalous *progressions* (slow-and-low, gradual ramp) that EMA misses
+    because each individual score looks normal. Trained on-the-fly once the buffer
+    reaches MIN_SAMPLES. Blended at 25% weight into the main ChromaDB score.
+
+    Degrades gracefully to the raw score if scikit-learn is unavailable or the
+    buffer has insufficient data — no hard dependency on the library.
+    """
+    MIN_SAMPLES  = 10   # minimum observations before IF model is fit
+    BLEND_WEIGHT = 0.25 # IF contribution to final score (ChromaDB = 75%)
+    BUFFER_SIZE  = 50   # rolling window per entity
+
+    def __init__(self):
+        from collections import defaultdict
+        self._buffers: Dict[str, deque] = defaultdict(lambda: deque(maxlen=self.BUFFER_SIZE))
+        self._models:  Dict[str, Any]   = {}
+
+    def push(self, entity_id: str, score: float) -> None:
+        """Record a new score and retrain when the buffer is full enough."""
+        self._buffers[entity_id].append(score)
+        if len(self._buffers[entity_id]) >= self.MIN_SAMPLES:
+            self._fit(entity_id)
+
+    def _fit(self, entity_id: str) -> None:
+        try:
+            from sklearn.ensemble import IsolationForest
+            X = [[v] for v in self._buffers[entity_id]]
+            self._models[entity_id] = IsolationForest(
+                n_estimators=50, contamination=0.1, random_state=42
+            ).fit(X)
+        except Exception:
+            pass  # scikit-learn unavailable or insufficient data — degrade gracefully
+
+    def score(self, entity_id: str, current_score: float) -> float:
+        """Return blended score, or current_score unchanged if model not ready."""
+        model = self._models.get(entity_id)
+        if model is None:
+            return current_score
+        try:
+            # decision_function: more-negative = more anomalous; typical range ~[-0.5, 0.5]
+            raw = model.decision_function([[current_score]])[0]
+            if_score = max(0.0, min(1.0, 0.5 - raw))
+            return (1.0 - self.BLEND_WEIGHT) * current_score + self.BLEND_WEIGHT * if_score
+        except Exception:
+            return current_score
+
+
 # ── RLM Engine ────────────────────────────────────────────────────────────────
 class RLMEngine:
     """
@@ -141,6 +207,7 @@ class RLMEngine:
         self.producer: Optional[AIOKafkaProducer] = None
         self.redis: Optional[aioredis.Redis] = None
         self.db_pool: Optional[asyncpg.Pool] = None
+        self._seq_detector = SequenceAnomalyDetector()
 
     async def start(self):
         logger.info("🧠 CyberSentinel RLM Engine starting...")
@@ -160,6 +227,7 @@ class RLMEngine:
         self.producer = AIOKafkaProducer(
             bootstrap_servers=kafka_cfg.bootstrap,
             value_serializer=lambda v: json.dumps(v).encode(),
+            **_KAFKA_SASL_KWARGS,
         )
         await self.producer.start()
 
@@ -224,12 +292,16 @@ class RLMEngine:
             group_id="rlm-packet-processor",
             value_deserializer=lambda v: json.loads(v.decode()),
             auto_offset_reset="latest",
+            **_KAFKA_SASL_KWARGS,
         )
         await consumer.start()
         logger.info("📡 Consuming raw-packets topic")
         try:
             async for msg in consumer:
-                await self._process_packet_event(msg.value)
+                try:
+                    await self._process_packet_event(msg.value)
+                except Exception as exc:
+                    logger.error(f"Packet processing error (msg skipped): {exc}")
         finally:
             await consumer.stop()
 
@@ -275,13 +347,53 @@ class RLMEngine:
 
         # ── Standard path: ChromaDB similarity scoring for DPI packets ─────────
         profile_text = profile.to_text()
-        cached = await is_embed_cached(self.redis, profile_text, "threat_signatures")
+
+        # Check if new threat intel was ingested — bypass embed cache if so
+        # to ensure fresh scoring against updated CVE/CTI collections.
+        intel_updated = await self.redis.exists(
+            "threat_intel_updated:cve_database",
+            "threat_intel_updated:cti_reports",
+            "threat_intel_updated:threat_signatures",
+        )
+        cached = False if intel_updated else await is_embed_cached(
+            self.redis, profile_text, "threat_signatures"
+        )
         if cached:
             return
 
+        # Consume the intel-updated flag immediately so subsequent scoring cycles
+        # use the normal embed cache rather than rescoring for the full 3600s TTL
+        # (prevents thundering-herd where all profiles rescore on every pass).
+        if intel_updated:
+            await self.redis.delete(
+                "threat_intel_updated:cve_database",
+                "threat_intel_updated:cti_reports",
+                "threat_intel_updated:threat_signatures",
+            )
+
         anomaly_score, matched_threat = await self._score_anomaly(profile, profile_text)
+
+        # IsolationForest blend: detect anomalous score progressions in history (25% weight)
+        anomaly_score = self._seq_detector.score(profile.entity_id, anomaly_score)
+        self._seq_detector.push(profile.entity_id, anomaly_score)
+
         profile.anomaly_score = anomaly_score
+        profile.score_history.append(anomaly_score)
         await mark_embed_cached(self.redis, profile_text, "threat_signatures")
+
+        # EMA poisoning check (runs on every scoring pass, not per-packet)
+        _pkt_source = event.get("source", "dpi")
+        await self._check_ema_poisoning(profile, source=_pkt_source)
+
+        # Gradual escalation / trend detection
+        trend_alert = self._check_trend(profile)
+        if trend_alert:
+            trend_alert["source"] = _pkt_source  # preserve pipeline origin
+            logger.warning(
+                f"[TREND] {profile.entity_id} gradual escalation detected "
+                f"slope={trend_alert['trend_slope']} scores={trend_alert['trend_scores']}"
+            )
+            await self.producer.send(kafka_cfg.topics["threat_alerts"], value=trend_alert)
 
         if anomaly_score > rlm_cfg.anomaly_threshold:
             await self._emit_ml_alert(profile, matched_threat, event)
@@ -343,6 +455,97 @@ class RLMEngine:
             f"size={payload_size}B entropy={entropy:.2f}{dns_info}{http_info}"
         )
         profile.updated_at = datetime.utcnow().isoformat()
+
+    async def _check_ema_poisoning(self, profile: BehaviorProfile, source: str = "dpi") -> bool:
+        """
+        EMA poisoning detection: compare today's avg_bytes_per_min against the
+        snapshot stored 24h ago. If drift exceeds RLM_POISON_MAX_DAILY_DELTA
+        (default 50%), emit a POISONING_SUSPECTED alert.
+
+        Snapshot key: ema_daily:{ip}:{YYYYMMDD}
+        Written once per host per day, TTL=48h (so yesterday's value is always available).
+        Returns True if poisoning was detected and an alert was emitted.
+        """
+        if rlm_cfg.ema_poison_max_daily_delta <= 0:
+            return False
+
+        today_key     = f"ema_daily:{profile.entity_id}:{datetime.utcnow().strftime('%Y%m%d')}"
+        yesterday_key = f"ema_daily:{profile.entity_id}:{(datetime.utcnow() - __import__('datetime').timedelta(days=1)).strftime('%Y%m%d')}"
+
+        # Write today's snapshot if not already set (first observation of the day)
+        if not await self.redis.exists(today_key):
+            await self.redis.setex(today_key, 172800, str(profile.avg_bytes_per_min))  # TTL=48h
+
+        # Compare against yesterday's snapshot
+        yesterday_val = await self.redis.get(yesterday_key)
+        if yesterday_val is None:
+            return False  # No baseline yet — first day, nothing to compare
+
+        baseline = float(yesterday_val)
+        if baseline < 1.0:
+            return False  # Baseline too small for meaningful % comparison
+
+        delta = (profile.avg_bytes_per_min - baseline) / baseline
+        if delta > rlm_cfg.ema_poison_max_daily_delta:
+            logger.warning(
+                f"[POISONING] {profile.entity_id} avg_bytes_per_min drifted "
+                f"{delta:.0%} in 24h (baseline={baseline:.0f} current={profile.avg_bytes_per_min:.0f}) "
+                f"— possible EMA poisoning attack"
+            )
+            alert = {
+                "type":            "EMA_POISONING_SUSPECTED",
+                "severity":        "HIGH",
+                "timestamp":       datetime.utcnow().isoformat(),
+                "entity_id":       profile.entity_id,
+                "entity_type":     profile.entity_type,
+                "anomaly_score":   round(profile.anomaly_score, 4),
+                "mitre_technique": "T1036",  # Masquerading / defense evasion
+                "profile_summary": profile.to_text()[:300],
+                "src_ip":          profile.entity_id,
+                "dst_ip":          "",
+                "baseline_bytes_per_min": round(baseline, 2),
+                "current_bytes_per_min":  round(profile.avg_bytes_per_min, 2),
+                "daily_delta_pct":        round(delta * 100, 1),
+                "source":                 source,
+            }
+            await self.producer.send(kafka_cfg.topics["threat_alerts"], value=alert)
+            return True
+        return False
+
+    def _check_trend(self, profile: BehaviorProfile) -> Optional[Dict]:
+        """
+        Gradual escalation detection: look for RLM_TREND_WINDOW consecutive
+        strictly increasing anomaly scores in score_history even if none crosses
+        the alert threshold. This catches slow-ramp attacks that keep each
+        observation just below the threshold.
+
+        Returns an alert dict if a trend is detected, None otherwise.
+        """
+        window = rlm_cfg.trend_window
+        history = list(profile.score_history)
+        if len(history) < window:
+            return None
+
+        recent = history[-window:]
+        if all(recent[i] < recent[i + 1] for i in range(len(recent) - 1)):
+            slope = recent[-1] - recent[0]
+            if slope > 0.05:  # Meaningful upward slope, not just floating point noise
+                return {
+                    "type":            "GRADUAL_ESCALATION_DETECTED",
+                    "severity":        "HIGH",
+                    "timestamp":       datetime.utcnow().isoformat(),
+                    "entity_id":       profile.entity_id,
+                    "entity_type":     profile.entity_type,
+                    "anomaly_score":   round(recent[-1], 4),
+                    "mitre_technique": "",
+                    "profile_summary": profile.to_text()[:300],
+                    "src_ip":          profile.entity_id,
+                    "dst_ip":          "",
+                    "trend_scores":    [round(s, 4) for s in recent],
+                    "trend_slope":     round(slope, 4),
+                    "source":          "dpi",  # overwritten by caller with actual pkt source
+                }
+        return None
 
     async def _score_anomaly(
         self, profile: BehaviorProfile, profile_text: str
@@ -520,11 +723,15 @@ class RLMEngine:
             "source":            raw_event.get("source", "dpi"),
         }
 
-        await self.producer.send(kafka_cfg.topics["threat_alerts"], value=alert)
-        logger.warning(
-            f"🤖 {alert_type} [{severity}] {profile.entity_id} "
-            f"score={profile.anomaly_score:.3f} MITRE={mitre or 'UNKNOWN'}"
-        )
+        try:
+            await self.producer.send(kafka_cfg.topics["threat_alerts"], value=alert)
+            logger.warning(
+                f"🤖 {alert_type} [{severity}] {profile.entity_id} "
+                f"score={profile.anomaly_score:.3f} MITRE={mitre or 'UNKNOWN'} "
+                f"source={alert['source']}"
+            )
+        except Exception as exc:
+            logger.error(f"Failed to emit alert for {profile.entity_id}: {exc}")
 
         # Upsert profile into ChromaDB for future baseline comparison
         try:
@@ -550,21 +757,25 @@ class RLMEngine:
             group_id="rlm-alert-enricher",
             value_deserializer=lambda v: json.loads(v.decode()),
             auto_offset_reset="latest",
+            **_KAFKA_SASL_KWARGS,
         )
         await consumer.start()
         logger.info("🚨 Consuming threat-alerts for RLM enrichment")
         try:
             async for msg in consumer:
-                alert = msg.value
-                if alert.get("type") == "DPI_ALERT":
-                    src_ip = alert.get("src_ip", "")
-                    if src_ip in self.profiles:
-                        profile = self.profiles[src_ip]
-                        alert["rlm_profile_summary"] = profile.to_text()[:300]
-                        alert["rlm_anomaly_score"]   = profile.anomaly_score
-                        alert["observation_count"]   = profile.observation_count
-                        alert["enriched"]            = True
-                        await self.producer.send(kafka_cfg.topics["enriched"], value=alert)
+                try:
+                    alert = msg.value
+                    if alert.get("type") == "DPI_ALERT":
+                        src_ip = alert.get("src_ip", "")
+                        if src_ip in self.profiles:
+                            profile = self.profiles[src_ip]
+                            alert["rlm_profile_summary"] = profile.to_text()[:300]
+                            alert["rlm_anomaly_score"]   = profile.anomaly_score
+                            alert["observation_count"]   = profile.observation_count
+                            alert["enriched"]            = True
+                            await self.producer.send(kafka_cfg.topics["enriched"], value=alert)
+                except Exception as exc:
+                    logger.error(f"Alert enrichment error (msg skipped): {exc}")
         finally:
             await consumer.stop()
 

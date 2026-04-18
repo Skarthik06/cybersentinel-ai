@@ -1,313 +1,315 @@
-# 🛡️ CyberSentinel AI
+# CyberSentinel AI
 
 **Autonomous Threat Intelligence & Zero-Day Detection Platform**
 
-Enterprise-grade, AI-powered SOC platform combining Deep Packet Inspection, Recursive Language Model (RLM) behavioral profiling, and AI-driven autonomous investigation with a human-in-the-loop response workflow.
+Enterprise-grade, AI-powered SOC platform combining Deep Packet Inspection, Recursive Language Model (RLM) behavioral profiling, IsolationForest sequence anomaly detection, and AI-driven autonomous investigation with a human-in-the-loop response workflow. Deployed as **14 Docker containers** with a single command.
 
 ---
 
-## What Is This
+## What It Does
 
-CyberSentinel AI is a full-stack, production-deployable cybersecurity platform built as an academic capstone project. It combines five disciplines into a single autonomous system:
+```mermaid
+graph LR
+    A[Network Traffic] --> B[DPI Sensor]
+    B --> C[Kafka]
+    C --> D[RLM Engine]
+    D --> E[ChromaDB]
+    E --> F[MCP Orchestrator]
+    F --> G[AI Investigation]
+    G --> H[SOC Dashboard]
+    H --> I[Analyst Decision]
+    I --> J[Block / Dismiss]
+```
 
-- **Real-time packet analysis** via Deep Packet Inspection (Scapy)
-- **Behavioral AI profiling** via the Recursive Language Model (RLM) engine
-- **Semantic threat intelligence** via ChromaDB vector embeddings (RAG)
-- **Autonomous investigation** via AI agents (Claude / GPT-4o / Gemini, switchable)
-- **Human-in-the-loop SOAR** via Block Recommendations panel + n8n workflows
-
-The platform deploys as 14 Docker containers with a single command.
-
----
-
-## The Problem It Solves
-
-| Metric | Industry Average | CyberSentinel AI |
-|--------|-----------------|-----------------|
+| Problem | Industry Average | CyberSentinel AI |
+|---------|-----------------|-----------------|
 | Breach detection time | 194 days | < 1 second |
-| Alert triage | Manual by analyst | Autonomous AI |
+| Alert triage | Manual | Autonomous AI |
 | Incident creation | Hours to days | 15–45 seconds, 1 LLM call |
-| False positive rate | ~95% | Reduced via behavioral scoring |
-| CVE awareness | Manual monitoring | Automated, every 4 hours |
-| Block decisions | Ad-hoc | Human-in-the-loop review panel |
+| CVE awareness | Manual monitoring | Automated every 4 hours |
+| Block decisions | Ad-hoc | Human-in-the-loop review |
 
 ---
 
-## Architecture at a Glance
+## System Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  LAYER 1 — INGESTION                                            │
-│  DPI Sensor (Scapy) ──────────────────────────┐                 │
-│  Playwright CTI Scraper (NVD/CISA/MITRE/OTX) ─┼──► Kafka Bus   │
-│  Traffic Simulator (synthetic threat events) ──┘                │
-├─────────────────────────────────────────────────────────────────┤
-│  LAYER 2 — INTELLIGENCE                                         │
-│  RLM Engine ──► EMA Profiles ──► ChromaDB (cosine similarity)  │
-│  Embedding: all-MiniLM-L6-v2 (local, zero-cost, pinned)        │
-├─────────────────────────────────────────────────────────────────┤
-│  LAYER 3 — ORCHESTRATION                                        │
-│  Kafka Bridge ──► n8n SOAR (5 workflows)                        │
-│  MCP Orchestrator ──► 1-call AI investigation (optimized)      │
-├─────────────────────────────────────────────────────────────────┤
-│  LAYER 4 — DELIVERY                                             │
-│  FastAPI REST ──► React SOC Dashboard (6 tabs)                  │
-│  Grafana + Prometheus ──► Observability                         │
-│  Slack · Teams · PagerDuty · Jira · ServiceNow · Email         │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph INGESTION["Layer 1 — Ingestion"]
+        DPI[DPI Sensor<br/>Scapy + libpcap<br/>IPv4 + IPv6]
+        SIM[Traffic Simulator<br/>17 threat scenarios]
+        CTI[CTI Scraper<br/>NVD · CISA · MITRE · OTX]
+    end
+
+    subgraph INTELLIGENCE["Layer 2 — Intelligence"]
+        KAFKA[Kafka Event Bus<br/>raw-packets · threat-alerts]
+        RLM[RLM Engine<br/>EMA Profiles + IsolationForest]
+        CHROMA[ChromaDB<br/>all-MiniLM-L6-v2 embeddings]
+    end
+
+    subgraph ORCHESTRATION["Layer 3 — Orchestration"]
+        MCP[MCP Orchestrator<br/>1-call AI investigation]
+        N8N[n8n SOAR<br/>5 automation workflows]
+    end
+
+    subgraph DELIVERY["Layer 4 — Delivery"]
+        API[FastAPI Gateway<br/>JWT + RBAC]
+        DASH[React Dashboard<br/>6 tabs]
+        GRAF[Grafana + Prometheus<br/>Observability]
+    end
+
+    subgraph DATA["Persistence"]
+        PG[(PostgreSQL<br/>incidents · alerts · campaigns)]
+        REDIS[(Redis<br/>cache · blocks · sessions)]
+    end
+
+    DPI --> KAFKA
+    SIM --> KAFKA
+    CTI --> CHROMA
+    KAFKA --> RLM
+    RLM --> CHROMA
+    RLM --> KAFKA
+    KAFKA --> MCP
+    KAFKA --> N8N
+    MCP --> PG
+    MCP --> REDIS
+    API --> PG
+    API --> REDIS
+    API --> CHROMA
+    DASH --> API
+    GRAF --> PG
 ```
 
 ---
 
-## Two Input Modes: Real DPI vs Traffic Simulator
+## Two Input Modes
 
-CyberSentinel AI has **two completely separate input paths** that serve different purposes.
+### Mode 1 — Real DPI (Production)
 
-### Mode 1 — Real DPI Pipeline (full platform)
-```
-Real Network Traffic
-    │
-    ▼ sensor.py (Scapy)                 ← captures actual packets
-    │ Shannon entropy, TLS, DNS, HTTP analysis
-    ▼ Kafka: "raw-packets"
-    │
-    ▼ rlm_engine._consume_packets()
-    │ EMA behavioral profiling per IP
-    │ → behavior_profiles table (populated with real metrics)
-    │ → ChromaDB (anomaly scoring)
-    ▼ Kafka: "threat-alerts"            ← only if anomaly detected
-    │
-    ▼ mcp_orchestrator → LLM → incident created
-```
+```mermaid
+sequenceDiagram
+    participant NIC as Network Interface
+    participant DPI as DPI Sensor
+    participant K as Kafka raw-packets
+    participant RLM as RLM Engine
+    participant TA as Kafka threat-alerts
+    participant MCP as MCP Orchestrator
+    participant DB as PostgreSQL
 
-### Mode 2 — Traffic Simulator (testing & demo)
-```
-traffic_simulator.py
-    │ Bursts of 30–150 raw PacketEvent dicts per scenario
-    ▼ Kafka: "raw-packets"              ← SAME topic as real DPI (v1.2+)
-    │
-    ▼ rlm_engine._consume_packets()     ← EMA profiling, ChromaDB scoring
-    ▼ Kafka: "threat-alerts"            ← only if anomaly detected
-    │
-    ▼ mcp_orchestrator → LLM → incident created
+    NIC->>DPI: IPv4/IPv6 packets
+    DPI->>DPI: PII masking _mask_pii()
+    DPI->>K: PacketEvent JSON
+    K->>RLM: consume packet
+    RLM->>RLM: EMA profile update
+    RLM->>RLM: IsolationForest blend
+    RLM->>TA: anomaly alert if score > 0.65
+    TA->>MCP: consume alert
+    MCP->>MCP: 1-call AI investigation
+    MCP->>DB: create_incident()
+    MCP->>DB: _correlate_campaign()
 ```
 
-> **v1.2 change:** The simulator was upgraded to publish raw `PacketEvent` dicts to `raw-packets` (full pipeline). It no longer bypasses RLM. Both pipelines are now identical from the Kafka layer onwards.
+### Mode 2 — Traffic Simulator (Testing & Demo)
 
-**What each pipeline populates:**
+```mermaid
+sequenceDiagram
+    participant SIM as Traffic Simulator
+    participant K as Kafka raw-packets
+    participant RLM as RLM Engine
+    participant TA as Kafka threat-alerts
+    participant MCP as MCP Orchestrator
 
-| Data | Real DPI | Simulator (v1.2) |
-|------|----------|-----------------|
-| `alerts` table | Yes | Yes |
-| `incidents` table | Yes | Yes |
-| `packets` table | Yes (every packet) | Yes (scenario burst) |
-| `behavior_profiles.observation_count` | Yes (real) | Yes (burst count) |
-| `behavior_profiles.avg_bytes_per_min` | Yes (real EMA) | Yes (scenario values) |
-| `behavior_profiles.avg_entropy` | Yes (real EMA) | Yes (scenario values) |
-| `behavior_profiles.anomaly_score` | Yes (ChromaDB) | Yes (ChromaDB) |
-| `packets_per_minute` TimescaleDB view | Yes | Yes |
-| ChromaDB `behavior_profiles` collection | Yes | Yes |
+    SIM->>SIM: pick weighted scenario
+    SIM->>K: burst 30-150 PacketEvents
+    K->>RLM: same pipeline as real DPI
+    RLM->>TA: anomaly alert if score > 0.65
+    TA->>MCP: investigate or create pending incident
+```
 
-Both pipelines are complete. The real DPI pipeline captures genuine packets from your network interface; the simulator generates realistic packet bursts for controlled testing without Npcap.
+Both modes are **identical from the Kafka layer onwards** — the simulator is not a shortcut, it exercises the full RLM + AI stack.
 
 ---
 
 ## Quick Start
 
 ### Prerequisites
-- Docker Desktop with 12+ GB RAM allocated
-- One LLM API key: `ANTHROPIC_API_KEY` (Claude) OR `OPENAI_API_KEY` (GPT-4o) OR `GOOGLE_API_KEY` (Gemini)
+
+- Docker Desktop 24.0+ with 16 GB RAM allocated
+- One LLM API key: `OPENAI_API_KEY` (recommended) or `ANTHROPIC_API_KEY` or `GOOGLE_API_KEY`
 
 ### 1. Configure
+
 ```bash
 cp .env.example .env
-nano .env
-# Required: set LLM_PROVIDER (claude|openai|gemini) + matching API key
-# Recommended: LLM_PROVIDER=openai + OPENAI_API_KEY (GPT-4o mini, most cost-efficient)
+# Edit .env — set LLM_PROVIDER=openai and your OPENAI_API_KEY
 ```
 
-### 2. Launch Backend (14 services)
+### 2. Start all 14 services
+
 ```bash
-bash scripts/setup/install.sh
+docker compose up -d
+
+# Wait for Kafka to be healthy (~2-3 minutes)
+docker compose ps
 ```
 
-### 3. Add SOAR Automation (n8n)
+### 3. Run DB migrations (first time only)
+
 ```bash
-bash scripts/setup/add_n8n.sh
-# Then open http://localhost:5678 and import all 5 files from n8n/workflows/
+docker exec -i cybersentinel-postgres psql -U sentinel -d cybersentinel < scripts/db/migrate_campaigns.sql
+docker exec -i cybersentinel-postgres psql -U sentinel -d cybersentinel < scripts/db/migrate_multitenancy.sql
 ```
 
-### 4. Start Frontend
-```bash
-cd frontend
-npm install
-npm run dev
-# → http://localhost:5173
+### 4. Start n8n SOAR
+
+```powershell
+.\scripts\start_n8n.ps1
 ```
 
-### 5. Access Dashboards
+### 5. Open the dashboard
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
-| SOC Dashboard | http://localhost:5173 | — |
-| API (Swagger) | http://localhost:8080/docs | Bearer token via `/auth/token` |
+| SOC Dashboard | http://localhost:5173 | admin / cybersentinel2025 |
+| API Swagger | http://localhost:8080/docs | admin / cybersentinel2025 |
 | n8n SOAR | http://localhost:5678 | admin / see `.env` |
 | Grafana | http://localhost:3001 | admin / admin2025 |
 | Prometheus | http://localhost:9090 | none |
 
-**Default API credentials:**
-- Username: `admin` / Password: `cybersentinel2025`
-- Username: `analyst` / Password: `cybersentinel2025`
-
----
-
-## Project Structure
-
-```
-cybersentinel-ai/
-│
-├── src/                          # All application source code
-│   ├── core/                     # Shared: config, logger, constants
-│   ├── dpi/                      # Deep Packet Inspection engine
-│   ├── models/                   # RLM behavioral profiling engine
-│   ├── agents/                   # AI MCP agents (multi-provider)
-│   │   ├── mcp_orchestrator.py   # 1-call investigation pipeline
-│   │   ├── llm_provider.py       # Claude / OpenAI / Gemini abstraction
-│   │   ├── tools.py              # 9 MCP tool definitions
-│   │   └── prompts.py            # System prompts
-│   ├── ingestion/                # CTI scraper + RAG embedder
-│   ├── simulation/               # Traffic simulator (synthetic threats)
-│   │   └── traffic_simulator.py  # 12 threat scenarios, Kafka producer
-│   └── api/                      # FastAPI REST gateway
-│
-├── docker/                       # One Dockerfile per service
-├── n8n/                          # SOAR workflows + Kafka bridge
-├── scripts/                      # DB schema, setup scripts
-├── configs/                      # Prometheus + Grafana configs
-├── frontend/                     # React SOC Dashboard (6 tabs)
-├── tests/                        # Unit + integration tests
-├── docs/                         # Full project documentation
-│
-├── docker-compose.yml            # 14-service stack
-├── .env.example                  # All environment variables documented
-└── README.md                     # This file
-```
+> See `docs/RUNNING.md` for the full start/stop guide and troubleshooting.
 
 ---
 
 ## SOC Dashboard — 6 Tabs
 
-The React dashboard at `http://localhost:5173` has six tabs:
-
 | Tab | Purpose |
 |-----|---------|
-| OVERVIEW | Risk gauge, 6 metric cards, 24h alert timeline, platform health radar |
-| ALERTS | Full alert table with severity badges, anomaly score bars, MITRE tags |
-| INCIDENTS | Incident registry — OPEN / INVESTIGATING / RESOLVED / CLOSED lifecycle |
-| RESPONSE | Human-in-the-loop: Block Recommendations + Active Incidents + Firewall Rules |
+| OVERVIEW | Risk gauge, metric cards, 24h alert timeline, platform health |
+| ALERTS | Alert table — severity badges, anomaly score bars, MITRE tags |
+| INCIDENTS | Incident lifecycle — OPEN / INVESTIGATING / RESOLVED / CLOSED |
+| RESPONSE | Human-in-the-loop: Block Recommendations, Active Incidents, Firewall Rules |
 | THREAT INTEL | ChromaDB semantic search + MITRE coverage map + CTI source status |
-| HOSTS | RLM behavioral profile lookup — anomaly score, entropy, block status, recent alerts |
-
-### RESPONSE Tab (Human-in-the-Loop)
-
-The RESPONSE tab has three panels:
-
-**Block Recommendations** — AI-flagged IPs awaiting analyst decision. Every CRITICAL/HIGH incident with `block_recommended=True` appears here. Analyst clicks **BLOCK IP** (inserts `firewall_rules` row + Redis `blocked:{ip}`) or **DISMISS** (marks incident RESOLVED without action).
-
-**Active Incidents** — All `status='OPEN'` incidents as clickable cards. Expand any incident to see the AI investigation summary, Technical Playbook, and Threat Signature matches.
-
-**Firewall Rules** — Currently blocked IPs from the `firewall_rules` table. Each row has an **UNBLOCK** button that calls `DELETE /api/v1/firewall-rules?ip={ip}` and removes the Redis key.
+| HOSTS | RLM behavioral profile lookup — anomaly score, entropy, kill chain |
 
 ---
 
-## AI Investigation — Token-Optimized Pipeline
+## AI Investigation Pipeline
 
-The investigation engine uses a stateless **1-LLM-call pipeline** (not an agentic loop):
+```mermaid
+flowchart TD
+    A[HIGH or CRITICAL alert received] --> B
 
+    subgraph PARALLEL["Step 1 — Parallel intel gathering (0 LLM calls)"]
+        B[asyncio.gather]
+        B --> C[query_threat_database\nChromaDB top-3]
+        B --> D[get_host_profile\nChromaDB + PostgreSQL]
+        B --> E[lookup_ip_reputation\nAbuseIPDB API]
+        B --> F[get_recent_alerts\nPostgreSQL last 6h]
+    end
+
+    C --> G[_summarize_result\ncompress to 1-3 lines each]
+    D --> G
+    E --> G
+    F --> G
+
+    G --> H["Step 2 — Single LLM call\nmax_tokens=1024 · tools=None\n~553 tokens · $0.000165"]
+
+    H --> I[Parse JSON verdict]
+    I --> J[_create_incident\nPostgreSQL]
+    I --> K[_correlate_campaign\nkill chain tracking]
+    J --> L{block_recommended?}
+    L -->|Yes| M[RESPONSE tab\nanalyst reviews]
+    L -->|No| N[INCIDENTS tab\nOPEN status]
 ```
-Alert received
-    │
-    ▼ asyncio.gather() — 4 intel tools run in PARALLEL (zero LLM calls)
-    │ ├─ query_threat_database (ChromaDB)
-    │ ├─ get_host_profile (ChromaDB)
-    │ ├─ lookup_ip_reputation (AbuseIPDB)
-    │ └─ get_recent_alerts (PostgreSQL)
-    │
-    ▼ _summarize_result() — compress each result to essential facts
-    │
-    ▼ 1 LLM call — compact context → structured JSON verdict
-    │ max_tokens=1024, tools=None (no tool schemas in prompt)
-    │
-    ▼ Parse JSON → create_incident() directly from code
-```
-
-**Token efficiency results:**
 
 | Metric | Old Agentic Loop | Optimized 1-Call |
 |--------|-----------------|-----------------|
-| LLM API calls per investigation | 3 | **1** |
-| Tokens per investigation | ~5,500–7,000 | **~553** |
-| Input:Output ratio | ~10:1 | **~2:1** |
-| Reduction | — | **~90%** |
-| Cost per investigation (GPT-4o mini) | ~$0.001 | **~$0.000165** |
-| Budget runway ($5) | ~5,000 investigations | **~30,000 investigations** |
+| LLM calls / investigation | 3 | **1** |
+| Tokens / investigation | ~5,500–7,000 | **~553** |
+| Cost (GPT-4o mini) | ~$0.001 | **~$0.000165** |
+| Budget runway ($5) | ~5,000 | **~30,000 investigations** |
 
 ---
 
-## LLM Provider Configuration
+## Anomaly Detection Stack
 
-Switch providers by changing one environment variable — no code changes:
-
-```bash
-# .env
-LLM_PROVIDER=openai        # claude | openai | gemini
-OPENAI_API_KEY=sk-...      # only the matching key is required
-
-# Optional model overrides
-LLM_MODEL_PRIMARY=gpt-4o-mini    # investigation agent (default per provider)
-LLM_MODEL_FAST=gpt-4o-mini       # CVE analysis (fast/cheap tier)
-LLM_MODEL_ANALYSIS=gpt-4o-mini   # daily SOC reports
-LLM_TEMPERATURE=0.2              # inference temperature
+```mermaid
+graph LR
+    A[PacketEvent] --> B[EMA Profile Update]
+    B --> C[profile.to_text]
+    C --> D{Redis cache hit?}
+    D -->|Yes| E[reuse last score]
+    D -->|No| F[ChromaDB cosine similarity]
+    F --> G[base_score 0-1]
+    G --> H[IsolationForest blend\n25% weight on score history]
+    H --> I[final_score]
+    I --> J{score > 0.65?}
+    J -->|Yes| K[threat-alerts topic]
+    J -->|No| L[continue profiling]
 ```
 
-**Recommended configuration for cost efficiency:**
-```bash
-LLM_PROVIDER=openai
-# GPT-4o mini: $0.15/1M input, $0.60/1M output
-# ~553 tokens/investigation → $0.000165/investigation
-# INVESTIGATION_INTERVAL_SEC=1800 → ~$0.008/day → 625 days on $5 budget
-```
-
-**Provider defaults:**
-| Provider | Primary Model | Fast Model | Analysis Model |
-|----------|-------------|------------|----------------|
-| claude | claude-opus-4-5 | claude-haiku-4-5-20251001 | claude-sonnet-4-6 |
-| openai | gpt-4o-mini | gpt-4o-mini | gpt-4o-mini |
-| gemini | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash |
-
-> **Note on Gemini:** The free tier is limited to 20 requests/day (not 250), and the safety filter blocks security content ("malware", "C2", "reverse shell"). Gemini is not recommended for this project.
+The **IsolationForest** layer sits on a 50-observation rolling buffer per IP and detects anomalous *progressions* — a slow ramp like `[0.30, 0.33, 0.37, 0.41, 0.46]` is flagged even though no single value crosses the threshold.
 
 ---
 
-## Live DPI — Real Packet Capture on Windows
+## Kill Chain / Campaign Tracking
 
-To capture **real network traffic** from your Windows machine, use the included launcher:
+```mermaid
+erDiagram
+    incidents ||--o{ campaign_incidents : linked_to
+    attacker_campaigns ||--|{ campaign_incidents : contains
 
+    attacker_campaigns {
+        text campaign_id PK
+        text src_ip
+        timestamptz first_seen
+        timestamptz last_seen
+        int incident_count
+        text max_severity
+        text[] mitre_stages
+    }
+
+    campaign_incidents {
+        text campaign_id FK
+        text incident_id FK
+    }
 ```
-Double-click: Start Live DPI.bat
+
+Every incident is automatically correlated with a campaign via `_correlate_campaign_with_pool()`. Incidents from the same source IP within 24 hours are grouped into the same campaign. The `GET /api/v1/campaigns` endpoint exposes all campaigns ordered by last activity.
+
+---
+
+## Docker Compose Deployment
+
+```mermaid
+graph TB
+    subgraph DC["Docker Compose — cybersentinel-net (14 containers)"]
+        subgraph INFRA["Infrastructure"]
+            ZK[zookeeper]
+            KF[kafka\nhost:9092]
+            PG[postgres\n:5432]
+            RD[redis\n:6379]
+            CD[chromadb\n:8000]
+        end
+        subgraph CORE["Core Services"]
+            DPI[dpi-sensor\nnetwork_mode: host]
+            RLM[rlm-engine]
+            SCR[threat-intel-scraper]
+            MCP[mcp-orchestrator\n:3000]
+            API[api-gateway\n:8080]
+            SIM[traffic-simulator]
+        end
+        subgraph DELIVERY["Delivery"]
+            FE[frontend\n:5173]
+            PR[prometheus\n:9090]
+            GR[grafana\n:3001]
+        end
+    end
+
+    N8N[N8N standalone\n:5678] -->|host.docker.internal:8080| API
 ```
 
-The launcher automatically:
-1. Elevates to Administrator (required for Npcap)
-2. Installs Npcap 1.80 silently if not present
-3. Installs Python packages (`scapy`, `aiokafka`, `redis`)
-4. Starts Docker Desktop if not running
-5. Starts the full Docker compose stack
-6. Launches `src/dpi/sensor.py` pointing at `localhost:9092` (Kafka)
-
-**Npcap** is the Windows packet capture driver. Without it, Scapy cannot read raw packets. The launcher handles the install automatically. For manual setup see [`docs/LIVE_DPI_SETUP.md`](docs/LIVE_DPI_SETUP.md).
-
-> **Important:** The DPI sensor runs **on the host machine** (not in Docker) so it can access the physical network interface. All other services run in Docker.
+Data survives container restarts because all state lives in named Docker volumes: `postgres_data`, `redis_data`, `kafka_data`, `chromadb_data`, `grafana_data`.
 
 ---
 
@@ -315,88 +317,128 @@ The launcher automatically:
 
 | Technique | ID | Detection Layer |
 |---|---|---|
-| C2 via HTTP/S (Application Layer Protocol) | T1071.001 | DPI timing analysis + RLM |
-| Network Scanning (Network Service Discovery) | T1046 | DPI SYN flood detection |
-| Data Exfiltration (Non-C2 Encrypted Channel) | T1048.003 | RLM volume anomaly + entropy |
-| DGA Malware (Dynamic Resolution) | T1568.002 | DPI DNS analysis |
-| Lateral Movement SMB | T1021.002 | RLM internal traffic patterns |
-| Lateral Movement RDP | T1021.001 | DPI + RLM |
-| Obfuscated Payload (Packed/Encrypted) | T1027 | DPI entropy threshold |
+| C2 Application Layer Protocol | T1071.001 | DPI timing + RLM |
+| Network Service Discovery | T1046 | DPI SYN flood |
+| Exfiltration over Non-C2 Channel | T1048.003 | RLM volume + entropy |
+| Dynamic DNS Resolution (DGA) | T1568.002 | DPI DNS analysis |
+| SMB Lateral Movement | T1021.002 | RLM internal patterns |
+| RDP Lateral Movement | T1021.001 | DPI + RLM |
+| Obfuscated/Packed Payload | T1027 | DPI entropy |
 | Protocol Tunneling | T1572 | DPI oversized ICMP/DNS |
-| Brute Force Password Guessing | T1110.001 | DPI rapid auth failure rate |
-| Password Spraying | T1110.003 | DPI low-and-slow pattern |
-| Exploit Public-Facing Application | T1190 | DPI payload pattern matching |
-| Reverse Shell (Unix Shell Interpreter) | T1059.004 | DPI suspicious port + bidirectional |
-| Tor/Proxy Usage | T1090.003 | CTI known exit node IPs |
+| Brute Force — Password Guessing | T1110.001 | DPI rapid auth failure |
+| Password Spraying | T1110.003 | DPI low-and-slow |
+| Exploit Public-Facing App | T1190 | DPI payload matching |
+| Unix Reverse Shell | T1059.004 | DPI suspicious port |
+| Proxy / Tor Usage | T1090.003 | CTI exit node IPs |
 | Ransomware Staging | T1486 | RLM SMB enumeration |
-| Credential Dumping | T1003 | RLM auth pattern spike |
+| Credential Dumping | T1003 | RLM auth spike |
+
+---
+
+## LLM Provider Configuration
+
+Switch providers with one env var — no code changes:
+
+```bash
+# .env
+LLM_PROVIDER=openai          # claude | openai | gemini
+OPENAI_API_KEY=sk-...
+
+LLM_MODEL_PRIMARY=gpt-4o-mini
+LLM_TEMPERATURE=0.2
+INVESTIGATION_INTERVAL_SEC=1800
+```
+
+| Provider | Model | Cost/investigation | Recommendation |
+|----------|-------|-------------------|----------------|
+| openai | gpt-4o-mini | $0.000165 | Best value |
+| claude | claude-sonnet-4-6 | ~$0.0004 | Best quality |
+| gemini | gemini-2.5-flash | free tier | Not recommended (content filter) |
 
 ---
 
 ## Common Commands
 
 ```bash
-# Start full platform
-docker compose up -d
+# Check all containers
+docker compose ps
 
-# Stop (data preserved)
-docker compose down
-
-# View all logs
-docker compose logs -f
-
-# View specific service
+# View service logs
 docker compose logs -f mcp-orchestrator
 docker compose logs -f rlm-engine
 
-# Rebuild a specific service after code change
+# Rebuild and redeploy a service after code change
 docker compose up -d --build mcp-orchestrator
 
-# Check resource usage
-docker stats
+# Restart a service
+docker compose restart api-gateway
 
-# Full reset (deletes all data volumes)
-bash scripts/setup/reset.sh
-
-# Run unit tests (no Docker needed)
-pip install pytest && pytest tests/unit/ -v
+# Full reset (WARNING: deletes all data volumes)
+docker compose down -v
+docker compose up -d
 ```
 
 ---
 
-## Documents
+## Project Structure
 
-| Document | Purpose |
-|----------|---------|
-| [`docs/PROJECT.md`](docs/PROJECT.md) | Master project overview |
-| [`docs/PRD.md`](docs/PRD.md) | Product Requirements Document |
-| [`docs/TRD.md`](docs/TRD.md) | Technical Requirements Document |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Deep-dive system design |
-| [`docs/PIPELINES.md`](docs/PIPELINES.md) | DPI vs Simulator pipeline comparison |
-| [`docs/LIVE_DPI_SETUP.md`](docs/LIVE_DPI_SETUP.md) | Npcap + Start Live DPI.bat setup guide |
-| [`docs/RAG_DESIGN.md`](docs/RAG_DESIGN.md) | RAG pipeline design + governance |
-| [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | All REST API endpoints |
-| [`docs/WORKFLOWS.md`](docs/WORKFLOWS.md) | n8n SOAR workflow specs |
-| [`docs/RESOURCES.md`](docs/RESOURCES.md) | Research papers + references |
-| [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | Version history + architectural decisions |
-| [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) | Dev setup + contribution guide |
+```
+cybersentinel-ai/
+├── src/
+│   ├── core/               # Config, logger, constants
+│   ├── dpi/                # DPI sensor — packet capture + PII masking
+│   ├── models/             # RLM engine — EMA + IsolationForest
+│   ├── agents/             # MCP orchestrator + LLM provider + tools
+│   ├── ingestion/          # CTI scraper + RAG embedder
+│   ├── simulation/         # Traffic simulator (17 scenarios)
+│   └── api/                # FastAPI REST gateway
+├── docker/                 # Dockerfiles (one per service)
+├── docker-compose.yml      # All 14 services
+├── scripts/
+│   ├── start_n8n.ps1       # Starts N8N container with correct env vars
+│   ├── start_live_dpi.ps1  # Windows DPI with Npcap
+│   └── db/                 # SQL migrations (migrate_campaigns.sql, migrate_multitenancy.sql)
+├── configs/                # Prometheus + Grafana configs
+├── frontend/               # React SOC Dashboard
+├── n8n/                    # SOAR workflow JSONs
+├── docs/                   # Full documentation
+└── .env                    # All secrets and config (gitignored)
+```
 
 ---
 
 ## Key Metrics
 
-- **14** Docker containers
-- **6** SOC Dashboard tabs (Overview, Alerts, Incidents, Response, Threat Intel, Hosts)
+- **14** Docker containers (`docker compose up -d`)
+- **6** SOC Dashboard tabs
 - **5** SOAR workflows (n8n)
+- **17** simulated threat scenarios (12 MITRE-mapped + 5 novel)
 - **15** MITRE ATT&CK techniques covered
 - **5** live CTI sources (NVD, CISA, Abuse.ch, MITRE, OTX)
-- **17** simulated threat scenarios (12 MITRE-mapped + 5 unknown novel threats)
-- **11+** enterprise integrations
-- **3** LLM providers (Claude, GPT-4o, Gemini) — switchable via single env var
-- **1** LLM API call per investigation (~553 tokens, ~$0.000165)
-- **0** external embedding API calls (fully local)
-- **25** supporting research papers
+- **3** LLM providers switchable via single env var
+- **1** LLM call per investigation (~553 tokens, ~$0.000165)
+- **0** external embedding API calls (fully local, CPU-only)
+- **11/16** documented limitations fully fixed
 
 ---
 
-*CyberSentinel AI v1.2 — Academic Capstone Project 2025/2026*
+## Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [`docs/RUNNING.md`](docs/RUNNING.md) | Start/stop guide, everyday workflow, troubleshooting |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Deep-dive system design with Mermaid diagrams |
+| [`docs/PIPELINES.md`](docs/PIPELINES.md) | DPI vs Simulator pipeline comparison |
+| [`docs/DEPLOYMENT_PLAN.md`](docs/DEPLOYMENT_PLAN.md) | Kubernetes deployment guide |
+| [`docs/DATABASE.md`](docs/DATABASE.md) | Full schema — all tables, indexes, migrations |
+| [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | All REST API endpoints |
+| [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | Version history + architectural decisions |
+| [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) | Known limitations + severity |
+| [`docs/LIMITATIONS_FIXES.md`](docs/LIMITATIONS_FIXES.md) | Fix audit — what was addressed and how |
+| [`docs/TRD.md`](docs/TRD.md) | Technical Requirements Document |
+| [`docs/RAG_DESIGN.md`](docs/RAG_DESIGN.md) | RAG pipeline design + governance |
+| [`docs/WORKFLOWS.md`](docs/WORKFLOWS.md) | n8n SOAR workflow specifications |
+
+---
+
+*CyberSentinel AI v1.3.0 — Academic Capstone Project 2025/2026*

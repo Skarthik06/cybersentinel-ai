@@ -1,353 +1,286 @@
 # The Two Input Pipelines
 
-**CyberSentinel AI — DPI Real Pipeline vs Traffic Simulator**
+**CyberSentinel AI v1.3.0 — DPI Real Pipeline vs Traffic Simulator**
 
-This document explains one of the most important architectural distinctions in CyberSentinel AI: the system has two data input paths. Both feed the same unified processing pipeline through the `raw-packets` Kafka topic.
-
-> **v1.2 update:** The Traffic Simulator was upgraded in v1.2 to publish raw `PacketEvent` dicts to the `raw-packets` topic instead of pre-formed alerts to `threat-alerts`. Both pipelines are now **identical from the Kafka layer onwards** — the simulator is no longer a shortcut; it exercises the full RLM + AI investigation stack.
+Both pipelines feed the same unified processing stack through the `raw-packets` Kafka topic. From that point onwards the code path is **identical** — same RLM engine, same IsolationForest layer, same AI investigation.
 
 ---
 
 ## Overview
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  PIPELINE 1 — REAL DPI (Production)                                 │
-│                                                                      │
-│  Real Network Traffic → sensor.py → raw-packets → RLM Engine       │
-│                       → threat-alerts → MCP Orchestrator            │
-│                                                                      │
-│  Populates: packets, behavior_profiles (real metrics), alerts,      │
-│             incidents, ChromaDB behavior_profiles collection         │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph LR
+    subgraph P1["Pipeline 1 — Real DPI (Production)"]
+        NIC[Network Interface\nIPv4 + IPv6] --> SENSOR[DPI Sensor\nScapy AsyncSniffer]
+        SENSOR --> PII[_mask_pii\nGDPR redaction]
+    end
 
-┌─────────────────────────────────────────────────────────────────────┐
-│  PIPELINE 2 — TRAFFIC SIMULATOR (Testing & Demo)                    │
-│                                                                      │
-│  traffic_simulator.py → raw-packets → RLM Engine                   │
-│                       → threat-alerts → MCP Orchestrator            │
-│                                                                      │
-│  Populates: packets (partial), behavior_profiles, alerts, incidents │
-│  Each scenario = burst of 30–150 PacketEvents → RLM sees real volume│
-└─────────────────────────────────────────────────────────────────────┘
-```
+    subgraph P2["Pipeline 2 — Traffic Simulator (Testing)"]
+        SIM[Traffic Simulator\n17 scenarios]
+    end
 
-Both pipelines merge at `raw-packets` → `RLM Engine` → `threat-alerts` → `MCP Orchestrator`.
+    PII --> RAW[Kafka\nraw-packets]
+    SIM --> RAW
+
+    subgraph UNIFIED["Unified Pipeline — identical for both inputs"]
+        RAW --> RLM[RLM Engine\nEMA + IsolationForest]
+        RLM --> TA[Kafka\nthreat-alerts]
+        TA --> MCP[MCP Orchestrator\n1-call AI investigation]
+        MCP --> PG[(PostgreSQL)]
+        MCP --> CAMP[Campaign\nCorrelation]
+    end
+```
 
 ---
 
-## Pipeline 1 — Real DPI Path (Full Platform)
+## Pipeline 1 — Real DPI Path (Production)
 
-### Step-by-Step Flow
+### Packet Capture and PII Masking
 
-```
-Physical or Virtual Network Interface
-    │
-    ▼
-src/dpi/sensor.py  (Scapy AsyncSniffer + BPF filter "ip")
-    │
-    ├── For EVERY packet:
-    │     PacketEvent dataclass built with:
-    │     ├── src_ip, dst_ip, src_port, dst_port
-    │     ├── protocol (TCP/UDP/ICMP/DNS)
-    │     ├── payload_size (bytes)
-    │     ├── flags (SYN, ACK, RST, etc.)
-    │     ├── ttl
-    │     ├── entropy (Shannon entropy of raw payload bytes, 0–8 scale)
-    │     ├── has_tls (True if TLS layer detected)
-    │     ├── has_dns (True if DNS layer present)
-    │     ├── dns_query (extracted domain name)
-    │     ├── http_method, http_host, http_uri, user_agent
-    │     ├── is_suspicious (True if any detector fires)
-    │     ├── suspicion_reasons (list of triggered detector names)
-    │     └── session_id (bidirectional: sorted(src:sport, dst:dport))
-    │
-    └──► Kafka topic: "raw-packets"   (ALL packets — every single one)
+```mermaid
+sequenceDiagram
+    participant NIC as Network Interface
+    participant DPI as sensor.py
+    participant MASK as _mask_pii()
+    participant K as Kafka raw-packets
+
+    NIC->>DPI: Raw IPv4/IPv6 packet
+    DPI->>DPI: Build PacketEvent (21 fields)
+    note over DPI: Shannon entropy, TLS detection,\nDNS query, HTTP metadata,\nsession_id fingerprint
+    DPI->>MASK: event_dict
+    MASK->>MASK: Redact emails in dns_query, http_uri, user_agent
+    MASK->>MASK: Redact credential params (password=, token=, api_key=)
+    MASK-->>DPI: sanitized event_dict
+    DPI->>K: PacketEvent JSON (gzip compressed)
 ```
 
-```
-Kafka topic: "raw-packets"
-    │
-    ▼
-src/models/rlm_engine._consume_packets()
-    │
-    ├── Get or create BehaviorProfile for src_ip
-    │
-    ├── _update_profile() — EMA update:
-    │   ├── avg_bytes_per_min   = (1-α)*old + α*payload_size
-    │   ├── avg_entropy         = (1-α)*old + α*entropy
-    │   ├── avg_packets_per_min = (1-α)*old + α*1
-    │   ├── dominant_protocols[protocol] += EMA
-    │   ├── typical_dst_ports[dst_port]  += 1
-    │   ├── typical_dst_ips[dst_ip]      += 1
-    │   ├── active_hours[hour_of_day]    += EMA
-    │   ├── weekend_ratio               = EMA of is_weekend
-    │   ├── observation_count           += 1
-    │   └── context_window.append(event_summary)  ← rolling last-N
-    │
-    ├── profile.to_text() → natural language string:
-    │     "Entity 10.0.0.55 (host) behavior: avg 8420 bytes/min,
-    │      847.0 packets/min, entropy 7.10. Protocols: TCP(85%)...
-    │      Anomaly: 0.723. Recent: [last 5 events]."
-    │
-    ├── is_embed_cached(redis, profile_text) ?
-    │     YES → skip ChromaDB query (reuse last anomaly_score)
-    │     NO  → continue
-    │
-    ├── ChromaDB cosine similarity:
-    │     threat_collection.query(query_texts=[profile_text], n_results=3)
-    │     similarity = max(0, 1 - distance/2)
-    │     anomaly_score = top result similarity
-    │
-    ├── mark_embed_cached(redis, profile_text)
-    │
-    └── if anomaly_score > RLM_ANOMALY_THRESHOLD (0.40):
-    └──► Kafka topic: "threat-alerts"  (RLM behavioral anomaly alert)
+**PacketEvent fields:** `timestamp`, `src_ip`, `dst_ip`, `src_port`, `dst_port`, `protocol`, `payload_size`, `flags`, `ttl`, `entropy`, `has_tls`, `has_dns`, `dns_query`, `http_method`, `http_host`, `http_uri`, `user_agent`, `is_suspicious`, `suspicion_reasons`, `session_id`
+
+**IPv6 support:** `BPF_FILTER=ip or ip6` captures both address families. All 21 PacketEvent fields support IPv6 addresses.
+
+### RLM Engine Processing
+
+```mermaid
+sequenceDiagram
+    participant K as Kafka raw-packets
+    participant RLM as RLM Engine
+    participant EMA as EMA Profiler
+    participant CHROMA as ChromaDB
+    participant REDIS as Redis Cache
+    participant IF as IsolationForest
+    participant TA as Kafka threat-alerts
+
+    K->>RLM: consume PacketEvent
+    RLM->>EMA: _update_profile(src_ip, event)
+    EMA->>EMA: avg_bytes_per_min = (1-alpha)*old + alpha*payload_size
+    EMA->>EMA: avg_entropy, avg_packets_per_min, protocols, ports
+    EMA->>EMA: observation_count += 1
+    EMA-->>RLM: updated BehaviorProfile
+
+    RLM->>RLM: profile.to_text() → natural language string
+    RLM->>REDIS: is_embed_cached(sha256(profile_text))?
+    alt Cache hit
+        REDIS-->>RLM: reuse last anomaly_score
+    else Cache miss
+        RLM->>CHROMA: cosine similarity vs threat_signatures
+        CHROMA-->>RLM: base_score (0-1)
+        RLM->>REDIS: mark_embed_cached()
+    end
+
+    RLM->>IF: score(entity_id, base_score)
+    IF->>IF: 50-obs rolling buffer\nIsolationForest blend (25% weight)
+    IF-->>RLM: final_score
+
+    RLM->>IF: push(entity_id, final_score)
+
+    alt final_score > 0.65
+        RLM->>TA: publish threat alert
+    end
 ```
 
-```
-Every 300 seconds (RLM_SAVE_INTERVAL):
-    ├── UPSERT all in-memory BehaviorProfiles → PostgreSQL behavior_profiles
-    │     ├── entity_id (IP address)
-    │     ├── anomaly_score (ChromaDB-computed, real)
-    │     ├── observation_count (real packet count)
-    │     ├── avg_bytes_per_min (EMA, real)
-    │     ├── avg_entropy (EMA, real)
-    │     ├── dominant_protocols (JSONB)
-    │     ├── typical_dst_ports (JSONB)
-    │     └── profile_text (the to_text() string)
-    │
-    └── Upsert profile → ChromaDB behavior_profiles collection
-          ID: profile_{ip}_{YYYYMMDDH}
-          TTL: 30 days
+### Profile Persistence
+
+Every 300 seconds the RLM engine UPSERTs all in-memory profiles to PostgreSQL:
+
+```mermaid
+graph LR
+    TIMER[300s timer] --> UPSERT[UPSERT behavior_profiles]
+    UPSERT --> PG[(PostgreSQL\nentity_id, anomaly_score,\nobservation_count, avg_bytes_per_min\navg_entropy, profile_text)]
+    UPSERT --> CD[(ChromaDB\nbehavior_profiles collection\n30-day TTL)]
 ```
 
 ---
 
 ## Pipeline 2 — Traffic Simulator Path (Testing & Demo)
 
-### What the Simulator Does (v1.2 — Full DPI Pipeline Edition)
+### What the Simulator Generates
 
 `src/simulation/traffic_simulator.py` generates 17 threat scenarios as **bursts of 30–150 raw `PacketEvent` dicts** and publishes them to the **same `raw-packets` Kafka topic** that the real DPI sensor uses.
 
-This means every simulated scenario passes through the **full RLM pipeline**: EMA profiling → ChromaDB scoring → anomaly detection → `threat-alerts`. The `min_observations` gate (default: 20 packets) is cleared by the burst.
+```mermaid
+sequenceDiagram
+    participant SIM as traffic_simulator.py
+    participant K as Kafka raw-packets
+    participant RLM as RLM Engine (same as Pipeline 1)
 
-### PacketEvent Structure (simulator output)
-
-```python
-# scenario_c2_beacon() — one packet from the burst:
-{
-    "src_ip":          "192.168.1.15",     ← randomly chosen from INTERNAL_IPS
-    "dst_ip":          "185.220.101.47",   ← randomly chosen from EXTERNAL_C2_IPS
-    "src_port":        54823,
-    "dst_port":        443,
-    "protocol":        "TCP",
-    "payload_size":    312,                ← scenario-realistic value
-    "entropy":         6.8,               ← high for C2 beacon
-    "flags":           "PA",
-    "has_tls":         True,
-    "has_dns":         False,
-    "dns_query":       None,
-    "http_method":     None,
-    "is_suspicious":   True,
-    "suspicion_reasons": ["BEACON_TIMING_REGULARITY", "HIGH_ENTROPY_PAYLOAD"],
-    "session_id":      "TCP:192.168.1.15:54823-185.220.101.47:443",
-    "timestamp":       "2026-04-06T14:22:01.123456",
-}
+    SIM->>SIM: random weighted scenario selection
+    note over SIM: 17 scenarios — 12 MITRE-mapped\n+ 5 unknown novel threats
+    SIM->>SIM: generate burst of 30-150 PacketEvents
+    note over SIM: enough packets to clear\nRLM_MIN_OBSERVATIONS=20 gate
+    SIM->>K: publish burst to raw-packets
+    K->>RLM: IDENTICAL processing to Pipeline 1
+    note over RLM: EMA profiling, ChromaDB scoring,\nIsolationForest blend, threat-alerts
 ```
 
-### Step-by-Step Flow
+### Simulator Scenarios
 
-```
-traffic_simulator.py
-    │
-    ├── Random weighted scenario selection:
-    │     C2_BEACON         weight=5  (most frequent)
-    │     DATA_EXFIL        weight=4
-    │     REVERSE_SHELL     weight=4
-    │     EXPLOIT_PUBLIC    weight=4
-    │     LATERAL_MOVEMENT  weight=3
-    │     ... (17 total)
-    │
-    ├── Call scenario function → generate BURST of 30–150 PacketEvent dicts
-    │     (enough for RLM min_observations gate to clear)
-    │
-    └──► Kafka topic: "raw-packets"  (SAME topic as real DPI sensor)
-```
+#### MITRE ATT&CK Mapped (12)
 
-```
-Kafka topic: "raw-packets"
-    │
-    ▼
-src/models/rlm_engine._consume_packets()   ← SAME as Pipeline 1
-    │
-    ├── EMA profiling per src_ip
-    ├── profile.to_text() → ChromaDB cosine similarity
-    └── if anomaly_score > 0.40:
-    └──► Kafka topic: "threat-alerts"
-```
+| Scenario | MITRE ID | Severity | Burst Size |
+|----------|----------|----------|-----------|
+| C2 Beacon | T1071.001 | CRITICAL | ~60 pkts |
+| Data Exfiltration | T1048.003 | HIGH | ~80 pkts |
+| Lateral Movement SMB | T1021.002 | HIGH | ~50 pkts |
+| Port Scan | T1046 | MEDIUM | ~150 pkts |
+| DNS Tunneling | T1071.004 | HIGH | ~100 pkts |
+| Brute Force SSH | T1110.001 | HIGH | ~120 pkts |
+| RDP Lateral Movement | T1021.001 | HIGH | ~45 pkts |
+| Exploit Public App | T1190 | CRITICAL | ~30 pkts |
+| High Entropy Payload | T1027 | HIGH | ~40 pkts |
+| Protocol Tunneling | T1572 | HIGH | ~60 pkts |
+| Credential Spray | T1110.003 | HIGH | ~90 pkts |
+| Reverse Shell | T1059.004 | CRITICAL | ~45 pkts |
 
-```
-Kafka topic: "threat-alerts"
-    │
-    ▼
-src/agents/mcp_orchestrator._consume_alerts()
-    │
-    ├── if severity NOT in ("HIGH", "CRITICAL"):
-    │     → INSERT into alerts table, done (no LLM call)
-    │
-    └── if severity in ("HIGH", "CRITICAL"):
-         → alert_queue.put(alert)
-         → _process_alert_queue() → InvestigateAgent.investigate(alert)
-```
-
-```
-InvestigateAgent.investigate(alert):
-    │
-    ├── asyncio.gather() — 4 tools in parallel:
-    │   ├── query_threat_database(type + mitre_technique)
-    │   ├── get_host_profile(src_ip)
-    │   ├── lookup_ip_reputation(dst_ip)    ← AbuseIPDB API
-    │   └── get_recent_alerts(src_ip, hours=6)
-    │
-    ├── _summarize_result() — compress each to 1-3 lines
-    │
-    ├── 1 LLM call → structured JSON verdict:
-    │     {title, severity, description, evidence,
-    │      affected_ips, mitre_techniques, block_recommended}
-    │
-    └── _create_incident() → PostgreSQL incidents table
-          block_recommended: True for CRITICAL/HIGH (from AI verdict)
-          block_target_ip: the IP to potentially block
-```
-
----
-
-## What Each Pipeline Populates
-
-| Data | Real DPI | Simulator (v1.2) |
-|------|----------|-----------------|
-| `alerts` table | Yes | Yes |
-| `incidents` table | Yes | Yes |
-| `packets` table | Yes (every packet captured) | Partial (PacketEvents, not raw bytes) |
-| `behavior_profiles.observation_count` | Yes (real count) | Yes (burst count, ~30–150) |
-| `behavior_profiles.avg_bytes_per_min` | Yes (real EMA) | Yes (scenario-realistic values) |
-| `behavior_profiles.avg_entropy` | Yes (real EMA) | Yes (scenario-realistic values) |
-| `behavior_profiles.anomaly_score` | Yes (ChromaDB computed) | Yes (ChromaDB computed) |
-| `packets_per_minute` TimescaleDB view | Yes | Yes |
-| ChromaDB `behavior_profiles` collection | Yes | Yes |
-
-> **Key difference from v1.1:** In v1.1 the simulator bypassed RLM entirely, leaving all behavioral profile fields at zero. In v1.2 the simulator feeds the full DPI pipeline and builds real profiles.
-
----
-
-## AI Investigation — Pending Incidents When Paused
-
-When AI investigation is **paused** for a source (simulator or dpi), the MCP orchestrator still creates a **pending incident** via `_create_pending_incident()`:
-
-- Incident status: `OPEN`, investigation_summary: `"⏸ AI investigation was paused..."`
-- `block_recommended`: `True` for CRITICAL/HIGH severity, `False` for MEDIUM/LOW
-- `block_target_ip`: set to `src_ip` for CRITICAL/HIGH
-
-This ensures CRITICAL and HIGH alerts always surface in the Block Recommendations panel even without a full AI investigation.
-
----
-
-## AI Investigation Summary Format (v1.2)
-
-When a full investigation runs, the AI generates a **structured 4-part analysis**:
-
-```
-OBSERVED: exact traffic seen — IPs, ports, protocol, entropy value, bytes/min
-WHY SUSPICIOUS: which behavioural indicator fired and why it deviates from baseline
-THREAT ASSESSMENT: most likely attacker objective + confidence (HIGH/MEDIUM/LOW) + reasoning
-ATTACKER PROFILE: threat category (APT / ransomware / opportunistic scanner / insider / botnet)
-```
-
-The **Technical Playbook** (remediation) is generated separately on analyst request and contains:
-- Containment commands (shell/CLI)
-- Eradication steps
-- Snort/Sigma detection rules tuned to the specific IOC
-- Verification checklist
-
----
-
-## Simulator Scenarios and MITRE Mapping
-
-### MITRE ATT&CK Mapped (12)
-
-| Scenario | MITRE ID | Severity | IPs Used |
-|----------|----------|----------|----------|
-| C2 Beacon | T1071.001 | CRITICAL | Internal → External C2 |
-| Data Exfiltration | T1048.003 | HIGH | Internal → External Exfil |
-| Lateral Movement SMB | T1021.002 | HIGH | Internal → Internal |
-| Port Scan | T1046 | MEDIUM | External → Internal |
-| DNS Tunneling | T1071.004 | HIGH | Internal → DNS Servers |
-| Brute Force SSH | T1110.001 | HIGH | External → Internal |
-| RDP Lateral Movement | T1021.001 | HIGH | Internal → Internal |
-| Exploit Public App | T1190 | CRITICAL | External → Internal |
-| High Entropy Payload | T1027 | HIGH | Internal → External C2 |
-| Protocol Tunneling | T1572 | HIGH | Internal → External C2 |
-| Credential Spray | T1110.003 | HIGH | External → Internal |
-| Reverse Shell | T1059.004 | CRITICAL | Internal → External C2 |
-
-### Unknown Novel Threats — AI Must Classify (5)
+#### Unknown Novel Threats — AI Must Classify (5)
 
 | Scenario | Type | Severity | Description |
 |----------|------|----------|-------------|
 | Polymorphic Beacon | POLYMORPHIC_BEACON | HIGH | Beacon intervals mutate to evade timing detection |
 | Covert Storage Channel | COVERT_STORAGE_CHANNEL | HIGH | Data encoded in IP header reserved/ToS fields |
-| Slow-Drip Exfil | SLOW_DRIP_EXFIL | HIGH | 1-2 bytes/packet over thousands of sessions |
+| Slow-Drip Exfil | SLOW_DRIP_EXFIL | HIGH | 1–2 bytes/packet over thousands of sessions |
 | Mesh C2 Relay | MESH_C2_RELAY | CRITICAL | Multi-hop internal relay, no direct external contact |
 | Synthetic Idle Traffic | SYNTHETIC_IDLE_TRAFFIC | MEDIUM | Mimics legitimate traffic but statistically wrong |
 
-Unknown threats have no MITRE mapping — the AI investigation agent must classify them and recommend a technique ID.
+Unknown threats have no MITRE mapping — the AI investigation must classify them and recommend a technique ID.
 
-**Scenario weighting:** CRITICAL scenarios (C2 Beacon, Exploit, Reverse Shell, Exfil) are weighted 4–5 vs others 2–3 to produce a realistic SOC alert distribution.
+### Scenario Weighting
+
+```mermaid
+pie title Scenario Frequency Distribution
+    "C2 Beacon (CRITICAL)" : 5
+    "Data Exfil (HIGH)" : 4
+    "Reverse Shell (CRITICAL)" : 4
+    "Exploit Public App (CRITICAL)" : 4
+    "Lateral Movement (HIGH)" : 3
+    "Port Scan (MEDIUM)" : 3
+    "DNS Tunneling (HIGH)" : 3
+    "Brute Force SSH (HIGH)" : 3
+    "RDP Lateral (HIGH)" : 3
+    "High Entropy (HIGH)" : 3
+    "Credential Spray (HIGH)" : 3
+    "Protocol Tunnel (HIGH)" : 2
+    "Novel Threats (5)" : 8
+```
+
+---
+
+## MCP Orchestrator — Shared Final Stage
+
+Both pipelines feed the same MCP Orchestrator:
+
+```mermaid
+flowchart TD
+    TA[Kafka threat-alerts] --> ROUTE{severity?}
+    ROUTE -->|HIGH or CRITICAL| QUEUE[investigation_queue]
+    ROUTE -->|MEDIUM or LOW| DIRECT[INSERT alerts table\nno LLM call]
+
+    QUEUE --> INV[InvestigateAgent.investigate]
+
+    subgraph GATHER["Parallel intel gathering — 0 LLM calls"]
+        INV --> G1[ChromaDB\nthreat_signatures top-3]
+        INV --> G2[host_profile\nPostgreSQL + ChromaDB]
+        INV --> G3[AbuseIPDB\nIP reputation]
+        INV --> G4[recent_alerts\nlast 6h]
+    end
+
+    G1 --> SUM[_summarize_result\n1-3 lines each]
+    G2 --> SUM
+    G3 --> SUM
+    G4 --> SUM
+
+    SUM --> LLM["Single LLM call\n~553 tokens · $0.000165"]
+    LLM --> VERDICT[JSON verdict]
+    VERDICT --> INC[_create_incident\nPostgreSQL]
+    VERDICT --> CAMP[_correlate_campaign\n24h window · asyncio.ensure_future]
+```
+
+### Pending Incidents When AI Is Paused
+
+When AI investigation is paused for a source, the MCP orchestrator still creates a **pending incident** via `_create_pending_incident()`:
+
+- Status: `OPEN`, investigation_summary: `"AI investigation was paused"`
+- `block_recommended`: `True` for CRITICAL/HIGH severity, `False` for MEDIUM/LOW
+- `block_target_ip`: set to `src_ip` for CRITICAL/HIGH
+
+CRITICAL and HIGH alerts always surface in the RESPONSE tab even without full AI analysis.
+
+---
+
+## What Each Pipeline Populates
+
+| Data | Real DPI | Simulator (v1.3) |
+|------|----------|-----------------|
+| `alerts` table | Yes | Yes |
+| `incidents` table | Yes | Yes |
+| `attacker_campaigns` table | Yes | Yes |
+| `firewall_rules` table | Yes | Yes (via block recommendations) |
+| `packets` table | Yes (every suspicious packet) | Yes (PacketEvent bursts) |
+| `behavior_profiles.observation_count` | Yes (real packet count) | Yes (burst count: 30–150) |
+| `behavior_profiles.avg_bytes_per_min` | Yes (real EMA) | Yes (scenario-realistic EMA) |
+| `behavior_profiles.avg_entropy` | Yes (real EMA) | Yes (scenario entropy EMA) |
+| `behavior_profiles.anomaly_score` | Yes (IsolationForest blended) | Yes (IsolationForest blended) |
+| ChromaDB `behavior_profiles` collection | Yes | Yes |
+| Raw packet bytes (pcap level) | Yes | No (no physical NIC) |
 
 ---
 
 ## Source Isolation — Investigation Pausing
 
-AI investigation can be paused **per source** independently:
+AI investigation can be paused **per source** independently via Redis keys:
 
-- `investigations:paused:simulator` — pauses only simulator investigations
-- `investigations:paused:dpi` — pauses only real DPI investigations
+| Redis Key | Effect |
+|-----------|--------|
+| `investigations:paused:simulator` | Pauses only simulator investigations |
+| `investigations:paused:dpi` | Pauses only real DPI investigations |
 
-This allows testing the simulator without burning LLM API quota, while keeping live DPI investigations running (or vice versa).
+Toggle via the Dashboard (POST `/api/v1/control?source=simulator`). Useful for testing the simulator without burning LLM API quota while keeping live DPI investigations running.
 
 ---
 
-## Configuring the Simulator
+## Configuring the Simulator Rate
 
 ```bash
-# .env or docker-compose environment
-SIMULATION_RATE=2   # events per minute (default: 2 = 1 every 30s)
-
-# For faster testing (more alerts):
-SIMULATION_RATE=10  # 1 event every 6s
-
-# For slower / budget-conscious mode:
-SIMULATION_RATE=1   # 1 event per minute
+# .env
+SIMULATION_RATE=2   # events per minute (default: 1 every 30s)
+SIMULATION_RATE=10  # faster testing: 1 every 6s
+SIMULATION_RATE=1   # budget-conscious: 1 per minute
 ```
-
-The simulator automatically spreads events evenly: `interval_sec = 60 / EVENTS_PER_MINUTE`.
 
 ---
 
 ## When to Use Each Pipeline
 
-| Use Case | Pipeline | Why |
-|----------|----------|-----|
-| Production SOC deployment | Real DPI | Need genuine packet capture from real interfaces |
-| Testing AI investigation | Simulator | No Npcap needed, controlled scenario injection |
-| Testing block recommendations | Simulator | Generates CRITICAL alerts reliably |
-| Testing n8n SOAR workflows | Simulator | Predictable event types and rates |
-| Demo to stakeholders | Simulator | Works without real network infrastructure |
-| Testing RLM behavioral profiling | Both | v1.2 simulator feeds the full RLM pipeline |
-| Academic evaluation of detection | Real DPI preferred | Real packet capture for genuine observation counts |
-| Budget-limited API testing | Simulator + pause AI | Toggle AI pause via dashboard, control LLM call rate |
+| Use Case | Pipeline |
+|----------|----------|
+| Production SOC deployment | Real DPI |
+| Testing AI investigation | Simulator |
+| Testing block recommendations | Simulator (reliable CRITICAL alerts) |
+| Testing n8n SOAR workflows | Simulator (predictable event types) |
+| Demo to stakeholders | Simulator (no network infrastructure needed) |
+| Testing IsolationForest progression detection | Both |
+| Academic evaluation with real metrics | Real DPI preferred |
+| Budget-limited API testing | Simulator + pause AI |
 
 ---
 
-*Pipeline Architecture — CyberSentinel AI v1.2 — 2026*
+*Pipeline Architecture — CyberSentinel AI v1.3.0 — 2026*

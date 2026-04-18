@@ -29,12 +29,12 @@ cp .env.example .env
 
 ### 2. Start the Full Stack
 
-```bash
+```powershell
 # Core platform (14 services)
-bash scripts/setup/install.sh
+docker compose up -d
 
-# Add n8n SOAR (optional)
-bash scripts/setup/add_n8n.sh
+# Start N8N SOAR (optional)
+.\scripts\start_n8n.ps1
 ```
 
 ### 3. Start the Frontend
@@ -315,7 +315,7 @@ docker compose up -d scraper
 - **No direct `os.getenv()` calls** outside `config.py`.
 - **Embedder governance:** Never call `ChromaDB.upsert()` directly. Always use `batch_upsert()` from `src/ingestion/embedder.py`.
 - **No `DefaultEmbeddingFunction()`** — always use `get_embedding_function()` from `src/ingestion/embedder.py`.
-- **Pipeline separation:** Never add code that bridges the simulator path into `raw-packets`. Simulator events belong in `threat-alerts` only.
+- **Pipeline separation:** Both DPI and simulator publish to `raw-packets`. Never bypass the RLM engine by publishing simulator events directly to `threat-alerts`.
 - **React:** Functional components only. Inline CSS. No UI libraries except Recharts. Access host profile data as `hostProfile.profile?.{metric}` (nested structure).
 
 ## Commit Message Convention
@@ -375,8 +375,9 @@ KEYS blocked:*
 # Check embedding cache size
 KEYS embed_cache:* | wc -l
 
-# Full reset (deletes all data)
-bash scripts/setup/reset.sh
+# Full reset (deletes all data volumes)
+docker compose down -v
+docker compose up -d
 ```
 
 ---
@@ -384,7 +385,7 @@ bash scripts/setup/reset.sh
 ## Common Issues
 
 ### "Behavior profile shows all zeros"
-Expected when using the traffic simulator. The RLM engine only reads from `raw-packets`. The simulator writes to `threat-alerts`. Real packet capture is required for behavioral profiling. See `docs/PIPELINES.md`.
+The RLM engine requires `RLM_MIN_OBSERVATIONS=20` packets per IP before scoring begins. The simulator generates bursts of 30–150 PacketEvents — profiles should populate within a few minutes. If still zero, check `docker compose logs rlm-engine`. See `docs/PIPELINES.md`.
 
 ### "Container using old code after rebuild"
 ```bash
@@ -409,4 +410,4 @@ Check `INVESTIGATION_INTERVAL_SEC` — if set too low, many investigations run p
 
 ---
 
-*Contributing Guide — CyberSentinel AI v1.1 — 2025/2026*
+*Contributing Guide — CyberSentinel AI v1.3.0 — 2025/2026*

@@ -3,31 +3,6 @@
   "nodes": [
     {
       "parameters": {
-        "rule": {
-          "interval": [
-            {
-              "field": "weeks",
-              "weeksInterval": 1,
-              "triggerAtDay": [
-                1
-              ],
-              "triggerAtHour": 8,
-              "triggerAtMinute": 0
-            }
-          ]
-        }
-      },
-      "id": "board-trigger",
-      "name": "Monday 8AM",
-      "type": "n8n-nodes-base.scheduleTrigger",
-      "typeVersion": 1.1,
-      "position": [
-        240,
-        300
-      ]
-    },
-    {
-      "parameters": {
         "httpMethod": "POST",
         "path": "run-board-report",
         "responseMode": "lastNode",
@@ -240,17 +215,6 @@
     }
   ],
   "connections": {
-    "Monday 8AM": {
-      "main": [
-        [
-          {
-            "node": "Authenticate",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Manual Trigger: Board Report": {
       "main": [
         [

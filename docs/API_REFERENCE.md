@@ -1,6 +1,6 @@
 # API Reference
 
-**CyberSentinel AI REST API — v1.0**
+**CyberSentinel AI REST API — v1.3.0**
 **Base URL:** `http://localhost:8080`
 **Interactive Docs:** `http://localhost:8080/docs` (Swagger UI)
 
@@ -32,13 +32,15 @@ username=admin&password=cybersentinel2025
 Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...
 ```
 
-**Token lifespan:** 480 minutes (8 hours). Configurable via `JWT_EXPIRY_MINUTES`.
+**Token lifespan:** 480 minutes (8 hours).
 
-**Default users (seeded by init.sql):**
-| Username | Password | Role |
-|----------|----------|------|
-| admin | cybersentinel2025 | admin |
-| analyst | cybersentinel2025 | analyst |
+**Default credentials:**
+
+| Username | Password |
+|----------|----------|
+| admin | cybersentinel2025 |
+
+> **Note:** Only the admin account is active. All authenticated endpoints accept the admin JWT token.
 
 ---
 
@@ -66,13 +68,9 @@ Platform health check. No authentication required.
       "active": "openai"
     }
   },
-  "version": "1.0.0"
+  "version": "1.3.0"
 }
 ```
-
-**LLM check fields:**
-- `claude` / `openai` / `gemini` — `true` if the API key is configured for that provider
-- `active` — which provider is currently selected via `LLM_PROVIDER`
 
 **Status values:** `healthy` (all checks ok) or `degraded` (one or more checks failed).
 
@@ -80,9 +78,9 @@ Platform health check. No authentication required.
 
 ### GET `/api/v1/dashboard`
 
-Real-time SOC dashboard statistics from TimescaleDB and Redis.
+Real-time SOC statistics from TimescaleDB and Redis.
 
-**Auth:** Bearer token (any role)
+**Auth:** Bearer token
 
 **Response:**
 ```json
@@ -104,42 +102,35 @@ Real-time SOC dashboard statistics from TimescaleDB and Redis.
     { "type": "PORT_SCAN_DETECTED", "count": 67 }
   ],
   "alerts_by_hour": [
-    { "hour": "2026-03-29T09:00:00", "count": 12, "severity": "HIGH" }
+    { "hour": "2026-04-16T09:00:00", "count": 12, "severity": "HIGH" }
   ],
   "risk_score": 0.62
 }
 ```
 
 **Notes:**
-- `risk_score` is computed as `min(1.0, (critical*10 + high*3) / max(total*5, 1))` — range 0.0–1.0
-- `active_incidents` counts OPEN and INVESTIGATING only
-- `blocked_ips` counts active (non-expired) firewall rules
-- `packets_analyzed` reflects packets in the TimescaleDB hypertable (real DPI + simulator bursts in v1.2)
+- `risk_score` — range 0.0–1.0 computed from critical/high ratio
+- `active_incidents` — OPEN and INVESTIGATING only
+- `blocked_ips` — active (non-expired) firewall rules
 
 ---
 
 ### GET `/api/v1/alerts`
 
-Paginated, filterable security alerts from the alerts table.
+Paginated, filterable security alerts.
 
-**Auth:** Bearer token (any role)
+**Auth:** Bearer token
 
 **Query Parameters:**
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `severity` | string | null | Filter: `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` |
-| `src_ip` | string | null | Filter by source IP address |
-| `alert_type` | string | null | Filter by alert type (e.g. `C2_BEACON_DETECTED`) |
+| `severity` | string | null | `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` |
+| `src_ip` | string | null | Filter by source IP |
+| `alert_type` | string | null | Filter by type (e.g. `C2_BEACON_DETECTED`) |
 | `hours` | integer | 24 | Look back N hours (max 8760) |
 | `limit` | integer | 100 | Results per page (max 1000) |
 | `offset` | integer | 0 | Pagination offset |
-
-**Example:**
-```http
-GET /api/v1/alerts?severity=CRITICAL&hours=48&limit=20
-Authorization: Bearer {token}
-```
 
 **Response:**
 ```json
@@ -148,7 +139,7 @@ Authorization: Bearer {token}
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "type": "C2_BEACON_DETECTED",
     "severity": "CRITICAL",
-    "timestamp": "2026-03-29T09:23:11.000Z",
+    "timestamp": "2026-04-16T09:23:11.000Z",
     "src_ip": "10.0.0.55",
     "dst_ip": "185.220.101.47",
     "src_port": 54821,
@@ -162,13 +153,15 @@ Authorization: Bearer {token}
 ]
 ```
 
+**Note on `anomaly_score`:** From v1.3.0, this is the IsolationForest-blended score (75% ChromaDB + 25% IsolationForest), not raw cosine similarity.
+
 ---
 
 ### POST `/api/v1/threat-search`
 
 Semantic similarity search against ChromaDB threat knowledge base.
 
-**Auth:** Bearer token (any role)
+**Auth:** Bearer token
 
 **Request Body:**
 ```json
@@ -180,9 +173,9 @@ Semantic similarity search against ChromaDB threat knowledge base.
 ```
 
 **Parameters:**
-- `query` — natural language description of what you're looking for
-- `n_results` — number of results (1–20, default 5)
-- `collection` — `threat_signatures` | `cti_reports` | `cve_database` (default: `threat_signatures`)
+- `query` — natural language description
+- `n_results` — 1–20 (default 5)
+- `collection` — `threat_signatures` | `cti_reports` | `cve_database`
 
 **Response:**
 ```json
@@ -190,7 +183,7 @@ Semantic similarity search against ChromaDB threat knowledge base.
   "query": "host making regular outbound connections...",
   "results": [
     {
-      "document": "Host exhibits C2 beacon behavior: regular low-volume outbound connections at precise intervals, high payload entropy...",
+      "document": "Host exhibits C2 beacon behavior...",
       "metadata": {
         "mitre": "T1071.001",
         "severity": "CRITICAL",
@@ -203,7 +196,7 @@ Semantic similarity search against ChromaDB threat knowledge base.
 }
 ```
 
-**Important:** Results are objects with `document`, `metadata`, and `similarity` fields. Scores above 0.65 indicate strong semantic match.
+Scores above 0.65 indicate strong semantic match.
 
 ---
 
@@ -211,7 +204,7 @@ Semantic similarity search against ChromaDB threat knowledge base.
 
 List security incidents with optional filters.
 
-**Auth:** Bearer token (any role)
+**Auth:** Bearer token
 
 **Query Parameters:**
 
@@ -234,17 +227,25 @@ List security incidents with optional filters.
     "mitre_techniques": ["T1572"],
     "block_recommended": true,
     "block_target_ip": "172.16.0.5",
-    "created_at": "2026-03-29T17:33:02.000Z",
-    "updated_at": "2026-03-29T17:33:02.000Z"
+    "created_at": "2026-04-16T17:33:02.000Z",
+    "updated_at": "2026-04-16T17:33:02.000Z"
   }
 ]
 ```
 
-**New fields (added 2026-03-28):**
-- `block_recommended` — `true` if the AI investigation flagged this IP for blocking or severity is CRITICAL
-- `block_target_ip` — the IP address the AI recommends blocking (typically src_ip or dst_ip)
+**Ordering:** OPEN first, then INVESTIGATING, then others. Within each status, CRITICAL before HIGH, newest first.
 
-**Ordering:** OPEN first, then INVESTIGATING, then others. Within each status, newest first. CRITICAL severity incidents sorted before HIGH.
+---
+
+### GET `/api/v1/incidents/{incident_id}/detail`
+
+Full detail for a single incident including investigation summary, evidence, and linked metadata.
+
+**Auth:** Bearer token
+
+**Path Parameter:** `incident_id` — e.g. `INC-1743266582`
+
+**Response:** Full `IncidentDetailResponse` with all fields including `investigation_summary`, `evidence`, `block_recommended`, `block_target_ip`, and `source`.
 
 ---
 
@@ -252,15 +253,13 @@ List security incidents with optional filters.
 
 Update incident status, notes, or assignment.
 
-**Auth:** Bearer token (role: analyst, responder, or admin)
-
-**Path Parameter:** `incident_id` — e.g. `INC-1743266582`
+**Auth:** Bearer token
 
 **Request Body (all fields optional):**
 ```json
 {
   "status": "RESOLVED",
-  "notes": "IP blocked, host reimaged. Root cause: phishing email opened by user.",
+  "notes": "IP blocked. Root cause: phishing email.",
   "assigned_to": "analyst@example.com"
 }
 ```
@@ -282,9 +281,9 @@ OPEN → INVESTIGATING → RESOLVED → CLOSED
 
 ### GET `/api/v1/block-recommendations`
 
-Returns all pending block recommendations — incidents where `block_recommended=TRUE` and `status='OPEN'`. Used by the RESPONSE tab to populate the human-in-the-loop review panel.
+All pending block recommendations — incidents where `block_recommended=TRUE` and `status='OPEN'`.
 
-**Auth:** Bearer token (any role)
+**Auth:** Bearer token
 
 **Response:**
 ```json
@@ -296,14 +295,14 @@ Returns all pending block recommendations — incidents where `block_recommended
     "block_target_ip": "172.16.0.5",
     "description": "Protocol tunneling via ICMP...",
     "mitre_techniques": ["T1572"],
-    "created_at": "2026-03-29T17:33:02.000Z"
+    "created_at": "2026-04-16T17:33:02.000Z"
   }
 ]
 ```
 
-**Ordering:** CRITICAL first, then HIGH, then by newest. Only OPEN incidents with `block_recommended=TRUE` are returned.
+**Ordering:** CRITICAL first, then HIGH, then newest.
 
-**Polling:** The RESPONSE tab polls this endpoint every 30 seconds to show fresh recommendations without page reload.
+The RESPONSE tab polls this endpoint every 30 seconds.
 
 ---
 
@@ -311,14 +310,12 @@ Returns all pending block recommendations — incidents where `block_recommended
 
 Analyst approves a block recommendation. Executes the block and marks the incident RESOLVED.
 
-**Auth:** Bearer token (role: responder or admin)
-
-**Path Parameter:** `incident_id` — the incident to action
+**Auth:** Bearer token
 
 **What this does:**
-1. Inserts row into `firewall_rules` table (PostgreSQL persistent block)
-2. Sets `Redis blocked:{ip}` key with 24-hour TTL (hot-path block enforcement)
-3. Updates incident `status = 'RESOLVED'`, `block_recommended = FALSE`
+1. Inserts row into `firewall_rules` (PostgreSQL persistent block)
+2. Sets `Redis blocked:{ip}` with 24-hour TTL
+3. Updates incident `status = 'RESOLVED'`
 4. Writes to `audit_log`
 
 **Response:**
@@ -335,15 +332,13 @@ Analyst approves a block recommendation. Executes the block and marks the incide
 
 ### POST `/api/v1/incidents/{incident_id}/dismiss`
 
-Analyst dismisses a block recommendation without blocking. Marks the incident RESOLVED.
+Analyst dismisses a block recommendation without blocking.
 
-**Auth:** Bearer token (role: analyst, responder, or admin)
-
-**Path Parameter:** `incident_id` — the incident to dismiss
+**Auth:** Bearer token
 
 **What this does:**
-1. Updates incident `status = 'RESOLVED'`, `block_recommended = FALSE`
-2. Does NOT insert into firewall_rules or Redis
+1. Updates incident `status = 'RESOLVED'`
+2. Does NOT insert into `firewall_rules` or Redis
 3. Writes to `audit_log`
 
 **Response:**
@@ -357,11 +352,29 @@ Analyst dismisses a block recommendation without blocking. Marks the incident RE
 
 ---
 
+### POST `/api/v1/incidents/{incident_id}/remediation`
+
+Generate an AI Technical Playbook for an incident on demand.
+
+**Auth:** Bearer token
+
+**Response:**
+```json
+{
+  "incident_id": "INC-20260416074415",
+  "playbook": "## TECHNICAL PLAYBOOK\n\n**CONTAINMENT (now)**\n```\niptables -I INPUT -s 185.220.101.47 -j DROP\n```\n\n**ERADICATION (next 2h)**\n..."
+}
+```
+
+Playbook contains actual shell/CLI commands using real IPs and ports, Snort/Sigma detection rules, and a verification checklist. Cost: ~1 LLM call (~$0.0002 with GPT-4o mini).
+
+---
+
 ### GET `/api/v1/hosts/{ip_address}`
 
 Full behavioral profile and alert history for a specific IP.
 
-**Auth:** Bearer token (any role)
+**Auth:** Bearer token
 
 **Path Parameter:** `ip_address` — e.g. `172.16.0.5`
 
@@ -376,84 +389,50 @@ Full behavioral profile and alert history for a specific IP.
   "profile": {
     "entity_id": "172.16.0.5",
     "entity_type": "host",
-    "anomaly_score": 0.0,
-    "observation_count": 0,
-    "avg_bytes_per_min": 0.0,
-    "avg_entropy": 0.0,
-    "profile_text": null,
-    "updated_at": "2026-03-29T17:33:02.000Z"
+    "anomaly_score": 0.913,
+    "observation_count": 48291,
+    "avg_bytes_per_min": 8420.4,
+    "avg_entropy": 7.12,
+    "profile_text": "Entity 172.16.0.5 (host) behavior...",
+    "updated_at": "2026-04-16T17:33:02.000Z"
   },
   "recent_alerts": [
     {
       "type": "DATA_EXFILTRATION_DETECTED",
       "severity": "HIGH",
-      "timestamp": "2026-03-29T17:05:59.000Z",
+      "timestamp": "2026-04-16T17:05:59.000Z",
       "dst_ip": "93.184.220.29",
       "mitre_technique": "T1048.003",
       "anomaly_score": 0.83
-    },
-    {
-      "type": "PROTOCOL_TUNNELING_DETECTED",
-      "severity": "HIGH",
-      "timestamp": "2026-03-29T16:58:58.000Z",
-      "dst_ip": "185.220.101.47",
-      "mitre_technique": "T1572",
-      "anomaly_score": 0.79
     }
   ]
 }
 ```
 
-**Response field explanations:**
+| Field | Source |
+|-------|--------|
+| `is_blocked` | Redis `blocked:{ip}` |
+| `block_count` | PostgreSQL `firewall_rules` COUNT |
+| `incident_count` | PostgreSQL `incidents` COUNT |
+| `profile` | PostgreSQL `behavior_profiles` — nested object |
+| `profile.anomaly_score` | IsolationForest-blended score |
+| `recent_alerts` | PostgreSQL `alerts` — last 20, newest first |
 
-| Field | Source | Notes |
-|-------|--------|-------|
-| `is_blocked` | Redis `blocked:{ip}` | Sub-millisecond hot-path lookup |
-| `block_count` | PostgreSQL `firewall_rules` COUNT | Historical block events for this IP |
-| `incident_count` | PostgreSQL `incidents` COUNT | Incidents where IP in `affected_ips` |
-| `profile` | PostgreSQL `behavior_profiles` | Nested object — all metrics under `profile.*` |
-| `profile.anomaly_score` | ChromaDB similarity computation | **0 if running simulator only (no real DPI)** |
-| `profile.observation_count` | EMA packet counter | **0 if running simulator only (no real DPI)** |
-| `profile.avg_bytes_per_min` | EMA of payload_size | **0 if running simulator only (no real DPI)** |
-| `profile.avg_entropy` | EMA of Shannon entropy | **0 if running simulator only (no real DPI)** |
-| `profile.profile_text` | `BehaviorProfile.to_text()` | null if no real DPI data |
-| `recent_alerts` | PostgreSQL `alerts` | Last 20 alerts sorted newest first |
-
-**Important:** `profile` is `null` if the host has never been seen by the RLM engine. With v1.2+ the simulator feeds the full RLM pipeline, so profile metrics are populated for simulator IPs too. Only purely external IPs with no packet history will have zero profiles.
-
----
-
-### POST `/api/v1/incidents/{incident_id}/remediation`
-
-Generate an AI Technical Playbook for an incident on demand.
-
-**Auth:** Bearer token (any role)
-
-**Path Parameter:** `incident_id`
-
-**Response:**
-```json
-{
-  "incident_id": "INC-20260406074415",
-  "playbook": "## TECHNICAL PLAYBOOK\n\n**CONTAINMENT (now)**\n```\niptables -I INPUT -s 185.220.101.47 -j DROP\n```\n\n**ERADICATION (next 2h)**\n..."
-}
-```
-
-The playbook contains actual shell/CLI commands using the real IPs and ports from the incident, Snort/Sigma detection rules tuned to the specific IOC, and verification checklist items. Cost: ~1 LLM call per request (~$0.0002 with GPT-4o mini).
+**Important:** Access profile metrics via `host.profile?.anomaly_score` (nested under `profile`), not `host.anomaly_score`.
 
 ---
 
 ### GET `/api/v1/firewall-rules`
 
-List all firewall rules (blocked IPs) with active/expired status.
+List all firewall rules (blocked IPs).
 
-**Auth:** Bearer token (any role)
+**Auth:** Bearer token
 
 **Query Parameters:**
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `status` | string | all | Filter: `active`, `expired`, `all` |
+| `status` | string | all | `active`, `expired`, `all` |
 
 **Response:**
 ```json
@@ -463,39 +442,34 @@ List all firewall rules (blocked IPs) with active/expired status.
     "ip_address": "185.220.101.47",
     "action": "BLOCK",
     "justification": "Analyst approved: C2 beacon confirmed",
-    "incident_id": "INC-20260406074415",
+    "incident_id": "INC-20260416074415",
     "created_by": "admin",
-    "created_at": "2026-04-06T08:00:00.000Z",
+    "created_at": "2026-04-16T08:00:00.000Z",
     "duration_hours": 24,
-    "expires_at": "2026-04-07T08:00:00.000Z",
+    "expires_at": "2026-04-17T08:00:00.000Z",
     "is_active": true
   }
 ]
 ```
 
-**Ordering:** Newest first. Up to 500 records.
-
 ---
 
 ### DELETE `/api/v1/firewall-rules`
 
-Analyst manually unblocks an IP. Removes the Redis key and expires all active rules for that IP in PostgreSQL.
+Unblock an IP. Removes Redis key and expires all active rules for that IP.
 
-**Auth:** Bearer token (role: analyst, responder, or admin — not viewer)
+**Auth:** Bearer token
 
 **Query Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `ip` | string | Yes | IP address to unblock (CIDR suffix stripped automatically) |
+| `ip` | string | Yes | IP to unblock (CIDR suffix stripped automatically) |
 
-**Example:**
 ```http
 DELETE /api/v1/firewall-rules?ip=185.220.101.47
 Authorization: Bearer {token}
 ```
-
-> **Note:** CIDR notation is accepted — `185.220.101.47/32` works identically to `185.220.101.47`. The endpoint strips the suffix and matches using `host(ip_address::inet) = $1`.
 
 **What this does:**
 1. Deletes Redis keys `blocked:{ip}` and `blocked:{ip}/32`
@@ -513,11 +487,41 @@ Authorization: Bearer {token}
 
 ---
 
+### GET `/api/v1/campaigns`
+
+All attacker campaigns ordered by most recent activity.
+
+**Auth:** Bearer token
+
+**Response:**
+```json
+[
+  {
+    "campaign_id": "10.0.0.55-1713200000",
+    "src_ip": "10.0.0.55",
+    "first_seen": "2026-04-16T08:00:00.000Z",
+    "last_seen": "2026-04-16T17:30:00.000Z",
+    "incident_count": 5,
+    "max_severity": "CRITICAL",
+    "mitre_stages": ["T1046", "T1021.002", "T1071.001", "T1486"],
+    "campaign_summary": null
+  }
+]
+```
+
+**Notes:**
+- Campaigns are grouped by `src_ip` within 24-hour windows
+- `max_severity` is a ratchet — it can only increase, never decrease
+- `mitre_stages` is the union of all MITRE techniques across campaign incidents
+- `campaign_summary` is null unless explicitly generated by AI
+
+---
+
 ### GET `/api/v1/control`
 
 Check whether AI investigation is paused for a source.
 
-**Auth:** Bearer token (any role)
+**Auth:** Bearer token
 
 **Query Parameters:**
 
@@ -539,13 +543,13 @@ Check whether AI investigation is paused for a source.
 
 Pause or resume AI investigation for a specific source.
 
-**Auth:** Bearer token (any role)
+**Auth:** Bearer token
 
 **Query Parameters:**
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `source` | string | `dpi` | `simulator` or `dpi` — which pipeline to control |
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `source` | string | `simulator` or `dpi` |
 
 **Request Body:**
 ```json
@@ -563,25 +567,11 @@ Pause or resume AI investigation for a specific source.
 }
 ```
 
-**When paused:** Incoming HIGH/CRITICAL alerts from that source still create basic OPEN incidents via `_create_pending_incident()` with `block_recommended=True` for CRITICAL/HIGH severity. No LLM call is made.
-
----
-
-### GET `/api/v1/incidents/{incident_id}/detail`
-
-Full detail for a single incident including investigation summary, evidence, and linked metadata.
-
-**Auth:** Bearer token (any role)
-
-**Path Parameter:** `incident_id`
-
-**Response:** Full `IncidentDetailResponse` schema with all fields including `investigation_summary`, `evidence`, `block_recommended`, `block_target_ip`, and `source`.
+When paused, incoming HIGH/CRITICAL alerts still create basic OPEN incidents via `_create_pending_incident()` — alerts are never silently dropped.
 
 ---
 
 ## Error Responses
-
-All errors follow RFC 7807 Problem Details format:
 
 ```json
 {
@@ -593,16 +583,9 @@ All errors follow RFC 7807 Problem Details format:
 |-------------|---------|
 | 400 | Bad request — invalid parameters |
 | 401 | Unauthorized — missing or invalid token |
-| 403 | Forbidden — insufficient role for this action |
 | 404 | Not found — resource doesn't exist |
 | 422 | Unprocessable Entity — request body validation failed |
-| 503 | Service Unavailable — upstream dependency (ChromaDB, PostgreSQL) down |
-
----
-
-## Rate Limiting
-
-No rate limiting is implemented in v1.0. For production deployment, place nginx or an API gateway in front that enforces per-IP rate limits.
+| 503 | Service Unavailable — upstream dependency down |
 
 ---
 
@@ -621,46 +604,37 @@ resp = httpx.post(f"{BASE}/auth/token",
 token = resp.json()["access_token"]
 headers = {"Authorization": f"Bearer {token}"}
 
-# Get dashboard
+# Dashboard
 dashboard = httpx.get(f"{BASE}/api/v1/dashboard", headers=headers).json()
 print(f"Risk score: {dashboard['risk_score']}")
-print(f"Blocked IPs: {dashboard['blocked_ips']}")
 
-# Get block recommendations
+# Block recommendations
 recs = httpx.get(f"{BASE}/api/v1/block-recommendations", headers=headers).json()
 for rec in recs:
-    print(f"Block recommendation: {rec['block_target_ip']} — {rec['title']}")
+    print(f"Block: {rec['block_target_ip']} — {rec['title']}")
 
 # Approve a block
-incident_id = recs[0]["incident_id"]
-result = httpx.post(f"{BASE}/api/v1/incidents/{incident_id}/block", headers=headers).json()
-print(f"Blocked: {result['blocked_ip']}")
+if recs:
+    result = httpx.post(f"{BASE}/api/v1/incidents/{recs[0]['incident_id']}/block", headers=headers).json()
+    print(f"Blocked: {result['blocked_ip']}")
 
-# Get host profile
+# Campaigns
+campaigns = httpx.get(f"{BASE}/api/v1/campaigns", headers=headers).json()
+for c in campaigns:
+    print(f"Campaign {c['campaign_id']}: {c['incident_count']} incidents, severity={c['max_severity']}")
+
+# Host profile — note nested 'profile' key
 host = httpx.get(f"{BASE}/api/v1/hosts/172.16.0.5", headers=headers).json()
-print(f"Blocked: {host['is_blocked']}")
-print(f"Incidents: {host['incident_count']}")
-# Access profile metrics via the nested 'profile' key:
 profile = host.get("profile") or {}
 print(f"Anomaly score: {profile.get('anomaly_score', 0)}")
 print(f"Observations: {profile.get('observation_count', 0)}")
-
-# Semantic threat search
-results = httpx.post(f"{BASE}/api/v1/threat-search", headers=headers,
-    json={"query": "lateral movement via SMB internal", "n_results": 3}).json()
-for r in results["results"]:
-    doc = r.get("document", "")
-    sim = r.get("similarity", 0)
-    mitre = r.get("metadata", {}).get("mitre", "N/A")
-    print(f"{sim:.2f} [{mitre}] — {doc[:80]}")
 ```
 
-### JavaScript (fetch)
+### JavaScript
 
 ```javascript
 const BASE = "http://localhost:8080";
 
-// Authenticate
 const { access_token } = await fetch(`${BASE}/auth/token`, {
   method: "POST",
   headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -669,32 +643,19 @@ const { access_token } = await fetch(`${BASE}/auth/token`, {
 
 const headers = { Authorization: `Bearer ${access_token}` };
 
-// Get block recommendations
-const recs = await fetch(`${BASE}/api/v1/block-recommendations`, { headers })
-  .then(r => r.json());
-console.log(`Pending block recommendations: ${recs.length}`);
+// Campaigns
+const campaigns = await fetch(`${BASE}/api/v1/campaigns`, { headers }).then(r => r.json());
+console.log(`Active campaigns: ${campaigns.length}`);
 
-// Dismiss a recommendation
-if (recs.length > 0) {
-  const result = await fetch(
-    `${BASE}/api/v1/incidents/${recs[0].incident_id}/dismiss`,
-    { method: "POST", headers }
-  ).then(r => r.json());
-  console.log(`Dismissed: ${result.status}`);
-}
-
-// Get host profile — note nested profile object
-const host = await fetch(`${BASE}/api/v1/hosts/172.16.0.5`, { headers })
-  .then(r => r.json());
-const anomalyScore = host.profile?.anomaly_score ?? 0;  // nested under .profile
-const profileText  = host.profile?.profile_text ?? "No profile";
-console.log(`${host.ip_address} | blocked=${host.is_blocked} | score=${anomalyScore}`);
+// Host profile — nested .profile object
+const host = await fetch(`${BASE}/api/v1/hosts/172.16.0.5`, { headers }).then(r => r.json());
+const score = host.profile?.anomaly_score ?? 0;
+console.log(`${host.ip_address} | blocked=${host.is_blocked} | score=${score}`);
 ```
 
 ### curl
 
 ```bash
-# Set token once
 TOKEN=$(curl -s -X POST http://localhost:8080/auth/token \
   -d "username=admin&password=cybersentinel2025" | python3 -c \
   "import sys,json; print(json.load(sys.stdin)['access_token'])")
@@ -711,13 +672,9 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 curl -s -X POST -H "Authorization: Bearer $TOKEN" \
   http://localhost:8080/api/v1/incidents/INC-1743266582/block
 
-# Dismiss a recommendation
-curl -s -X POST -H "Authorization: Bearer $TOKEN" \
-  http://localhost:8080/api/v1/incidents/INC-1743266582/dismiss
-
-# Host profile (note nested .profile object in response)
+# Campaigns
 curl -s -H "Authorization: Bearer $TOKEN" \
-  http://localhost:8080/api/v1/hosts/172.16.0.5
+  http://localhost:8080/api/v1/campaigns
 
 # Semantic threat search
 curl -s -X POST http://localhost:8080/api/v1/threat-search \
@@ -730,28 +687,28 @@ curl -s -X POST http://localhost:8080/api/v1/threat-search \
 
 ## Full Endpoint Summary
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/auth/token` | None | Get JWT token |
-| GET | `/health` | None | Platform health check |
-| GET | `/api/v1/dashboard` | Any | SOC statistics |
-| GET | `/api/v1/alerts` | Any | Paginated alert list |
-| POST | `/api/v1/threat-search` | Any | ChromaDB semantic search |
-| GET | `/api/v1/incidents` | Any | Incident list |
-| GET | `/api/v1/incidents/{id}/detail` | Any | Single incident full detail |
-| PATCH | `/api/v1/incidents/{id}` | analyst+ | Update incident |
-| PATCH | `/api/v1/incidents/{id}/status` | analyst+ | Update status only |
-| GET | `/api/v1/block-recommendations` | Any | Pending block recommendations |
-| POST | `/api/v1/incidents/{id}/block` | responder+ | Approve block |
-| POST | `/api/v1/incidents/{id}/dismiss` | analyst+ | Dismiss recommendation |
-| POST | `/api/v1/incidents/{id}/remediation` | Any | Generate AI playbook |
-| GET | `/api/v1/hosts/{ip}` | Any | Host behavioral profile |
-| GET | `/api/v1/firewall-rules` | Any | List blocked IPs |
-| DELETE | `/api/v1/firewall-rules?ip={ip}` | analyst+ | Unblock an IP |
-| GET | `/api/v1/control?source=` | Any | Check investigation pause state |
-| POST | `/api/v1/control?source=` | Any | Pause / resume investigations |
-| GET | `/metrics` | None | Prometheus metrics |
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/auth/token` | Get JWT token |
+| `GET` | `/health` | Platform health check |
+| `GET` | `/api/v1/dashboard` | SOC statistics |
+| `GET` | `/api/v1/alerts` | Paginated alert list |
+| `POST` | `/api/v1/threat-search` | ChromaDB semantic search |
+| `GET` | `/api/v1/incidents` | Incident list |
+| `GET` | `/api/v1/incidents/{id}/detail` | Single incident full detail |
+| `PATCH` | `/api/v1/incidents/{id}` | Update incident |
+| `GET` | `/api/v1/block-recommendations` | Pending block recommendations |
+| `POST` | `/api/v1/incidents/{id}/block` | Approve block |
+| `POST` | `/api/v1/incidents/{id}/dismiss` | Dismiss recommendation |
+| `POST` | `/api/v1/incidents/{id}/remediation` | Generate AI playbook |
+| `GET` | `/api/v1/hosts/{ip}` | Host behavioral profile |
+| `GET` | `/api/v1/firewall-rules` | List blocked IPs |
+| `DELETE` | `/api/v1/firewall-rules?ip={ip}` | Unblock an IP |
+| `GET` | `/api/v1/campaigns` | Attacker campaign list |
+| `GET` | `/api/v1/control?source=` | Check investigation pause state |
+| `POST` | `/api/v1/control?source=` | Pause / resume investigations |
+| `GET` | `/metrics` | Prometheus metrics |
 
 ---
 
-*API Reference — CyberSentinel AI v1.2 — 2025/2026*
+*API Reference — CyberSentinel AI v1.3.0 — 2025/2026*

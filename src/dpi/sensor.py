@@ -20,6 +20,11 @@ from aiokafka import AIOKafkaProducer
 from scapy.all import AsyncSniffer, IP, TCP, UDP, DNS, Raw, ICMP, sniff, get_if_list, conf
 from scapy.layers.http import HTTP, HTTPRequest, HTTPResponse
 from scapy.layers.tls.all import TLS
+try:
+    from scapy.layers.inet6 import IPv6, ICMPv6EchoRequest
+    _IPV6_AVAILABLE = True
+except ImportError:
+    _IPV6_AVAILABLE = False
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [DPI] %(levelname)s: %(message)s")
 logger = logging.getLogger("dpi-sensor")
@@ -145,6 +150,17 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 KAFKA_TOPIC_PACKETS = "raw-packets"
 KAFKA_TOPIC_ALERTS = "threat-alerts"
 
+# ── Kafka SASL/SCRAM-SHA-256 (optional — activated only when KAFKA_SASL_PASSWORD is set) ──
+_KAFKA_SASL_USERNAME = os.getenv("KAFKA_SASL_USERNAME", "")
+_KAFKA_SASL_PASSWORD = os.getenv("KAFKA_SASL_PASSWORD", "")
+_KAFKA_SASL_KWARGS: dict = (
+    {"security_protocol": "SASL_PLAINTEXT",
+     "sasl_mechanism": "SCRAM-SHA-256",
+     "sasl_plain_username": _KAFKA_SASL_USERNAME,
+     "sasl_plain_password": _KAFKA_SASL_PASSWORD}
+    if _KAFKA_SASL_PASSWORD else {}
+)
+
 # Known malicious port patterns
 SUSPICIOUS_PORTS = {
     4444, 5555, 6666, 7777, 8888,  # Common reverse shell ports
@@ -205,14 +221,21 @@ def make_session_id(src_ip: str, dst_ip: str, src_port: int, dst_port: int, prot
 
 
 def analyze_packet(pkt) -> Optional[PacketEvent]:
-    """Parse a raw Scapy packet into a structured PacketEvent."""
-    if not pkt.haslayer(IP):
+    """Parse a raw Scapy packet into a structured PacketEvent. Handles IPv4 and IPv6."""
+    # ── Layer 3 extraction — IPv4 or IPv6 ─────────────────────────────────────
+    if pkt.haslayer(IP):
+        ip_layer = pkt[IP]
+        src_ip   = ip_layer.src
+        dst_ip   = ip_layer.dst
+        ttl      = ip_layer.ttl
+    elif _IPV6_AVAILABLE and pkt.haslayer(IPv6):
+        ip_layer = pkt[IPv6]
+        src_ip   = ip_layer.src
+        dst_ip   = ip_layer.dst
+        ttl      = ip_layer.hlim  # IPv6 uses Hop Limit instead of TTL
+    else:
         return None
 
-    ip = pkt[IP]
-    src_ip = ip.src
-    dst_ip = ip.dst
-    ttl = ip.ttl
     proto = "OTHER"
     src_port = dst_port = 0
     flags = ""
@@ -336,7 +359,7 @@ class DPISensor:
         self.alert_count = 0
         _iface_cfg = os.getenv("CAPTURE_INTERFACE", "auto")
         self.interface = _detect_capture_interface() if _iface_cfg == "auto" else _iface_cfg
-        self.bpf_filter = os.getenv("BPF_FILTER", "ip")
+        self.bpf_filter = os.getenv("BPF_FILTER", "ip or ip6")
 
     async def start(self):
         logger.info("🚀 CyberSentinel DPI Sensor starting...")
@@ -346,6 +369,7 @@ class DPISensor:
             value_serializer=lambda v: json.dumps(v).encode("utf-8"),
             compression_type="gzip",
             max_batch_size=1048576,
+            **_KAFKA_SASL_KWARGS,
         )
         await self.producer.start()
 
@@ -371,6 +395,29 @@ class DPISensor:
             store=False,
         )
 
+    @staticmethod
+    def _mask_pii(event_dict: dict) -> dict:
+        """GDPR data minimisation: redact PII from packet metadata before Kafka publish.
+
+        Redacts email addresses and credential-bearing query parameters from
+        dns_query, http_uri, and user_agent fields.  Payload bytes are never
+        captured (entropy-only) so no further redaction is needed.
+        """
+        import re
+        _EMAIL_RE = re.compile(
+            r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}', re.ASCII
+        )
+        _CRED_RE = re.compile(
+            r'(?i)(password|passwd|token|api[_\-]?key|secret|auth(?:orization)?)[=:][\S]+'
+        )
+        for field in ("dns_query", "http_uri", "user_agent"):
+            val = event_dict.get(field)
+            if val:
+                val = _EMAIL_RE.sub("[email-redacted]", val)
+                val = _CRED_RE.sub(r'\1=[redacted]', val)
+                event_dict[field] = val
+        return event_dict
+
     async def _handle_packet(self, pkt):
         """Process a single captured packet."""
         event = analyze_packet(pkt)
@@ -379,6 +426,7 @@ class DPISensor:
 
         self.packet_count += 1
         event_dict = asdict(event)
+        event_dict = self._mask_pii(event_dict)  # GDPR: redact PII before streaming to Kafka
 
         # Stream to raw packets topic
         await self.producer.send(KAFKA_TOPIC_PACKETS, value=event_dict)

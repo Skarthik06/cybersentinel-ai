@@ -1,7 +1,7 @@
 # Product Requirements Document (PRD)
 
 **Project:** CyberSentinel AI
-**Version:** 1.1
+**Version:** 1.3.0
 **Status:** Production Ready
 **Date:** 2025/2026
 
@@ -334,4 +334,4 @@ The project is considered successful when:
 
 ---
 
-*Product Requirements Document — CyberSentinel AI v1.1 — 2025/2026*
+*Product Requirements Document — CyberSentinel AI v1.3.0 — 2025/2026*
