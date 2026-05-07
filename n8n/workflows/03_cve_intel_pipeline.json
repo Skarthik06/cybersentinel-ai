@@ -33,7 +33,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const cve = $input.first().json;\nconst prompt = 'You are a vulnerability intelligence analyst. Analyze this CVE and give a concise security advisory.\\n\\nCVE ID: ' + cve.cveid + '\\nCVSS Score: ' + cve.cvss + ' (' + cve.severity + ')\\nPublished: ' + cve.humanTime + '\\nActively Exploited: ' + (cve.activeExploit ? 'YES ⚠️' : 'No') + '\\nAffected Products: ' + JSON.stringify(cve.affectedProducts) + '\\nDescription: ' + cve.description + '\\n\\nProvide:\\n1. IMPACT SUMMARY (1-2 sentences: what can an attacker do?)\\n2. AFFECTED SYSTEMS (who is at risk?)\\n3. PATCH ACTION (specific version to upgrade to, or mitigation if no patch)\\n4. URGENCY (patch now / patch this week / monitor / low priority)\\n\\nBe specific and under 200 words.';\nreturn [{ json: { cve: cve, prompt: prompt } }];"
+        "jsCode": "const cve = $input.first().json;\nconst systemPrompt = 'You are a vulnerability intelligence analyst writing internal patch advisories. Output exactly four labeled sections, under 180 words total, no preamble.\\n\\n1. IMPACT — one sentence: what an attacker achieves with this CVE (RCE / privesc / info disclosure / DoS) and the prerequisites (auth required? user interaction?).\\n2. AT-RISK SYSTEMS — name the affected products and version range from the data. No general statements.\\n3. PATCH OR MITIGATION — name the fixed version OR the workaround. If no patch exists, say so and give the mitigation.\\n4. URGENCY — exactly one of: PATCH NOW / PATCH THIS WEEK / MONITOR / LOW PRIORITY. Use PATCH NOW only if active exploitation is reported or CVSS >= 9.0 with public PoC.';\nconst userPrompt = 'CVE: ' + cve.cveid + '\\nCVSS: ' + cve.cvss + ' (' + cve.severity + ')\\nPublished: ' + cve.humanTime + '\\nActive exploitation: ' + (cve.activeExploit ? 'YES' : 'No') + '\\nAffected products: ' + JSON.stringify(cve.affectedProducts) + '\\n\\n' + cve.description;\nreturn [{ json: { cve: cve, systemPrompt: systemPrompt, prompt: userPrompt } }];"
       },
       "id": "build-cve-prompt",
       "name": "Build CVE Prompt",
@@ -64,7 +64,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({ model: 'gpt-4o-mini', max_tokens: 512, messages: [{ role: 'user', content: $json.prompt }] }) }}",
+        "body": "={{ JSON.stringify({ model: 'gpt-4o-mini', max_tokens: 320, temperature: 0.2, messages: [{ role: 'system', content: $json.systemPrompt }, { role: 'user', content: $json.prompt }] }) }}",
         "options": {}
       },
       "id": "call-openai-03",

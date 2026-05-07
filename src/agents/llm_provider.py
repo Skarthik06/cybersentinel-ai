@@ -289,6 +289,7 @@ class OpenAIProvider(LLMProvider):
         system: Optional[str] = None,
         model: Optional[str] = None,
         max_tokens: int = 4096,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> LLMResponse:
         oai_messages = []
 
@@ -310,6 +311,11 @@ class OpenAIProvider(LLMProvider):
         if tools:
             kwargs["tools"]        = self._convert_tools(tools)
             kwargs["tool_choice"]  = "auto"
+        if response_format is not None:
+            # OpenAI JSON mode — guarantees a valid JSON object reply, lets us drop
+            # "no markdown / no preamble" instructions from the system prompt and
+            # saves ~80 input tokens per call.
+            kwargs["response_format"] = response_format
 
         response = await self._client.chat.completions.create(**kwargs)
         message = response.choices[0].message

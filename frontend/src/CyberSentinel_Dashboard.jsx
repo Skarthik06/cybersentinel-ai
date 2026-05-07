@@ -196,6 +196,20 @@ function ago(ts) {
   return `${Math.floor(s/3600)}h ago`;
 }
 
+// investigation_summary may be (a) the new structured JSON, (b) legacy plain text,
+// or (c) the "⏸ pending" sentinel. Returns a clean one-line preview for cards.
+function aiPreview(s, maxChars = 180) {
+  if (typeof s !== "string" || !s) return "";
+  if (s.startsWith("⏸")) return s;
+  if (s.trim().startsWith("{")) {
+    try {
+      const v = JSON.parse(s);
+      return (v.verdict || v.title || "").toString().substring(0, maxChars);
+    } catch { /* fall through to text fallback */ }
+  }
+  return s.length > maxChars ? s.substring(0, maxChars) + "…" : s;
+}
+
 function SevBadge({ s }) {
   return <span style={{ fontFamily:"monospace", fontSize:10, fontWeight:700, color:SEV_COLOR[s]||"#fff", background:SEV_BG[s]||"transparent", padding:"2px 8px", borderRadius:3, border:`1px solid ${SEV_COLOR[s]||"#fff"}40`, letterSpacing:1 }}>{s}</span>;
 }
@@ -1412,7 +1426,7 @@ export default function SOCDashboard() {
                       </div>
                       {rec.investigation_summary && (
                         <div style={{ fontSize:10, color:"#8899AA", fontFamily:"monospace", background:"rgba(5,13,21,0.5)", border:"1px solid rgba(79,195,247,0.08)", borderRadius:4, padding:"8px 10px", maxHeight:60, overflow:"hidden", lineHeight:1.6 }}>
-                          {rec.investigation_summary.substring(0,180)}{rec.investigation_summary.length>180?"…":""}
+                          {aiPreview(rec.investigation_summary, 180)}
                         </div>
                       )}
                     </div>
@@ -1591,7 +1605,7 @@ export default function SOCDashboard() {
                 </div>
                 {!pending && inc.investigation_summary && (
                   <div style={{ fontSize:10, color:"#8899AA", fontFamily:"monospace", background:"rgba(5,13,21,0.5)", border:"1px solid rgba(79,195,247,0.08)", borderRadius:4, padding:"6px 10px", maxHeight:44, overflow:"hidden", lineHeight:1.6, marginBottom:6 }}>
-                    {inc.investigation_summary.substring(0,160)}{inc.investigation_summary.length>160?"…":""}
+                    {aiPreview(inc.investigation_summary, 160)}
                   </div>
                 )}
                 {pending && (
@@ -2445,21 +2459,150 @@ export default function SOCDashboard() {
                           </div>
                         )}
 
-                        {/* Analysis text — strip any REMEDIATION: block (old data) */}
-                        <div style={{ background:"rgba(5,13,21,0.7)",
-                          border:"1px solid rgba(79,195,247,0.08)", borderRadius:6,
-                          padding:"14px 16px", fontSize:11, color:"#B0BEC5",
-                          lineHeight:1.9, fontFamily:"'DM Sans',sans-serif",
-                          whiteSpace:"pre-wrap", maxHeight:240, overflowY:"auto" }}>
-                          {aiSummary.replace(/REMEDIATION:[\s\S]*/i, '').trim() || aiSummary}
-                        </div>
+                        {/* Structured renderer: tries JSON.parse(aiSummary). If structured,
+                            renders the rich panel; otherwise falls back to plain text. */}
+                        {(() => {
+                          let v = null;
+                          if (typeof aiSummary === "string" && aiSummary.trim().startsWith("{")) {
+                            try { v = JSON.parse(aiSummary); } catch { v = null; }
+                          }
+                          const fmt = (val, suf="") => (val === null || val === undefined) ? "n/a" : `${val}${suf}`;
+                          const SEC_LBL = { fontFamily:"monospace", fontSize:9, color:"#4FC3F7", letterSpacing:2, marginBottom:6, textTransform:"uppercase" };
+                          const CARD    = { background:"rgba(5,13,21,0.7)", border:"1px solid rgba(79,195,247,0.08)", borderRadius:6, padding:"12px 14px" };
+                          const BULLET  = { fontSize:11, color:"#B0BEC5", lineHeight:1.65, fontFamily:"'DM Sans',sans-serif" };
+                          const CHIP    = { fontFamily:"monospace", fontSize:10, padding:"3px 8px", borderRadius:3 };
+
+                          if (!v || !v.verdict) {
+                            // Legacy plain-text fallback
+                            return (
+                              <div style={{ ...CARD, fontSize:11, color:"#B0BEC5", lineHeight:1.9,
+                                fontFamily:"'DM Sans',sans-serif", whiteSpace:"pre-wrap",
+                                maxHeight:300, overflowY:"auto" }}>
+                                {(typeof aiSummary === "string" ? aiSummary : "").replace(/REMEDIATION:[\s\S]*/i, '').trim() || aiSummary}
+                              </div>
+                            );
+                          }
+
+                          const conf = v.confidence || "MEDIUM";
+                          const confColor = conf === "HIGH" ? "#00E676" : conf === "MEDIUM" ? "#FFD740" : "#90A4AE";
+                          const ta = v.threat_assessment || {};
+                          const ap = v.attacker_profile  || {};
+                          const m  = v.evidence_metrics  || {};
+
+                          return (
+                            <div style={{ display:"flex", flexDirection:"column", gap:10, maxHeight:560, overflowY:"auto" }}>
+
+                              {/* Verdict — the headline sentence */}
+                              <div style={{ ...CARD, borderLeft:`3px solid ${sevColor}` }}>
+                                <div style={SEC_LBL}>Verdict</div>
+                                <div style={{ fontSize:13, color:"#E2E8F0", lineHeight:1.6, fontWeight:500 }}>
+                                  {v.verdict}
+                                </div>
+                                <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginTop:10 }}>
+                                  <span style={{ ...CHIP, color:confColor, background:`${confColor}14`, border:`1px solid ${confColor}40`, fontWeight:700 }}>
+                                    {conf} CONFIDENCE
+                                  </span>
+                                  {v.kill_chain_phase && (
+                                    <span style={{ ...CHIP, color:"#FF8A65", background:"rgba(255,138,101,0.1)", border:"1px solid rgba(255,138,101,0.25)" }}>
+                                      🎯 {v.kill_chain_phase}
+                                    </span>
+                                  )}
+                                  {(v.mitre_techniques || []).map(t => (
+                                    <span key={t} style={{ ...CHIP, color:"#90CAF9", background:"rgba(144,202,249,0.08)", border:"1px solid rgba(144,202,249,0.25)" }}>
+                                      {t}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+
+                              {/* Two-column: Observed | Why-not-normal */}
+                              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+                                <div style={CARD}>
+                                  <div style={SEC_LBL}>📡 Observed</div>
+                                  <ul style={{ margin:0, paddingLeft:18, ...BULLET }}>
+                                    {(v.observed || []).map((s,i) => <li key={i}>{s}</li>)}
+                                  </ul>
+                                </div>
+                                <div style={CARD}>
+                                  <div style={SEC_LBL}>📊 Why this is not normal</div>
+                                  <ul style={{ margin:0, paddingLeft:18, ...BULLET }}>
+                                    {(v.deviation || []).map((s,i) => <li key={i}>{s}</li>)}
+                                  </ul>
+                                </div>
+                              </div>
+
+                              {/* Threat Assessment */}
+                              <div style={CARD}>
+                                <div style={SEC_LBL}>⚠️ Threat Assessment</div>
+                                <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:8 }}>
+                                  {ta.objective && (
+                                    <span style={{ ...CHIP, color:sevColor, background:`${sevColor}12`, border:`1px solid ${sevColor}40`, fontWeight:600 }}>
+                                      Objective: {ta.objective}
+                                    </span>
+                                  )}
+                                </div>
+                                {ta.intent && (
+                                  <div style={{ ...BULLET, color:"#CBD5E1", marginBottom:6 }}>{ta.intent}</div>
+                                )}
+                                {ta.confidence_reasoning && (
+                                  <div style={{ ...BULLET, fontSize:10, color:"#90A4AE", fontStyle:"italic" }}>
+                                    Reasoning ({conf}): {ta.confidence_reasoning}
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Attacker Profile */}
+                              <div style={CARD}>
+                                <div style={SEC_LBL}>👤 Attacker Profile</div>
+                                <div style={{ display:"flex", alignItems:"baseline", gap:10, flexWrap:"wrap" }}>
+                                  <span style={{ fontFamily:"monospace", fontSize:11, color:"#FF8A65", fontWeight:700 }}>
+                                    {ap.category || "Unknown"}
+                                  </span>
+                                  {ap.rationale && (
+                                    <span style={{ ...BULLET, fontSize:11 }}>— {ap.rationale}</span>
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* Evidence Metrics — chip grid */}
+                              <div style={CARD}>
+                                <div style={SEC_LBL}>🔬 Evidence Metrics</div>
+                                <div style={{ display:"grid", gridTemplateColumns:"repeat(4, 1fr)", gap:8 }}>
+                                  {[
+                                    ["Anomaly", m.anomaly_score != null ? Number(m.anomaly_score).toFixed(2) : null, "#4FC3F7"],
+                                    ["Entropy", m.entropy != null ? Number(m.entropy).toFixed(2) : null, "#FF8A65"],
+                                    ["Bytes/min", m.bytes_per_min, "#00E676"],
+                                    ["Port", m.primary_port, "#FFD740"],
+                                    ["Protocol", m.protocol, "#90CAF9"],
+                                    ["AbuseIPDB", m.abuseipdb_confidence != null ? `${m.abuseipdb_confidence}%` : null, "#FF5252"],
+                                    ["Peers", m.peer_count, "#CE93D8"],
+                                    ["Recent alerts", m.recent_alerts_count, "#A5D6A7"],
+                                  ].map(([label, val, color]) => {
+                                    const isNA = val === null || val === undefined || val === "";
+                                    return (
+                                      <div key={label} style={{ background:"rgba(5,13,21,0.5)",
+                                        border:`1px solid ${isNA ? "rgba(255,255,255,0.05)" : color+"30"}`,
+                                        borderRadius:4, padding:"6px 8px", textAlign:"center" }}>
+                                        <div style={{ fontSize:8, color:"#546E7A", fontFamily:"monospace", letterSpacing:1, marginBottom:3 }}>{label}</div>
+                                        <div style={{ fontSize:12, fontFamily:"monospace", fontWeight:600,
+                                          color: isNA ? "#455A64" : color }}>
+                                          {isNA ? "n/a" : String(val)}
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })()}
 
                         {/* Model badge */}
                         <div style={{ display:"flex", alignItems:"center", gap:8,
                           justifyContent:"flex-end" }}>
                           <span style={{ fontFamily:"monospace", fontSize:9,
                             color:"rgba(79,195,247,0.35)", letterSpacing:1 }}>
-                            🤖 GPT-4o mini · ~$0.0003/call
+                            🤖 GPT-4o mini · structured · ~$0.0004/call
                           </span>
                         </div>
                       </div>

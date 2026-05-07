@@ -207,6 +207,8 @@ services:
       ABUSEIPDB_KEY: ${ABUSEIPDB_KEY:-}
       SLACK_WEBHOOK: ${SLACK_WEBHOOK:-}
       PAGERDUTY_KEY: ${PAGERDUTY_KEY:-}
+      # Per-investigation rate limit. 10s on paid OpenAI tier (was 60s for free Gemini).
+      INVESTIGATION_INTERVAL_SEC: ${INVESTIGATION_INTERVAL_SEC:-10}
     networks: [cybersentinel-net]
     depends_on:
       kafka:

@@ -118,7 +118,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const stats = $('Fetch Dashboard Stats').item.json;\nconst alertsRaw = $('Fetch Top Critical Alerts').item.json;\nconst incRaw = $('Fetch Open Incidents').item.json;\nconst alerts = Array.isArray(alertsRaw) ? alertsRaw : (alertsRaw.alerts || []);\nconst incidents = Array.isArray(incRaw) ? incRaw : (incRaw.incidents || []);\nconst dataStr = JSON.stringify({ stats, topAlerts: alerts.slice(0,3), openIncidents: incidents.slice(0,3) }, null, 2);\nconst today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });\nconst prompt = 'You are a senior SOC analyst. Write a Daily SOC Intelligence Report for ' + today + ' under 400 words covering:\\n1. EXECUTIVE SUMMARY\\n2. KEY METRICS\\n3. TOP THREATS\\n4. MITRE TECHNIQUES\\n5. RECOMMENDED ACTIONS\\n\\nDo NOT use placeholder text. Use the actual date: ' + today + '\\n\\nData:\\n' + dataStr;\nreturn [{ json: { prompt, stats } }];"
+        "jsCode": "const stats = $('Fetch Dashboard Stats').item.json;\nconst alertsRaw = $('Fetch Top Critical Alerts').item.json;\nconst incRaw = $('Fetch Open Incidents').item.json;\nconst alerts = Array.isArray(alertsRaw) ? alertsRaw : (alertsRaw.alerts || []);\nconst incidents = Array.isArray(incRaw) ? incRaw : (incRaw.incidents || []);\nconst dataStr = JSON.stringify({ stats: stats, topAlerts: alerts.slice(0,3), openIncidents: incidents.slice(0,3) });\nconst today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });\nconst systemPrompt = 'You are a senior SOC analyst writing the Daily SOC Intelligence Report for the security team standup. Output exactly five labeled sections, total under 350 words, no preamble, no markdown headers — just the section name in CAPS followed by content.\\n\\n1. EXECUTIVE SUMMARY — 2 sentences naming the dominant threat pattern of the day and the overall posture.\\n2. KEY METRICS — bullet list of the actual numbers from the data (alerts, criticals, open incidents, blocked IPs).\\n3. TOP THREATS — the three highest-severity alerts. Cite real src_ip → dst_ip and the technique. No generic phrases.\\n4. MITRE TECHNIQUES — the techniques observed today, grouped by tactic.\\n5. RECOMMENDED ACTIONS — three concrete steps the on-call analyst should take next, each tied to a specific incident or IP.\\n\\nUse only values present in the data. Do not invent IPs, CVEs, or counts. If a section has no data, say \"None today.\"';\nconst userPrompt = 'Date: ' + today + '\\n\\nData:\\n' + dataStr;\nreturn [{ json: { systemPrompt: systemPrompt, prompt: userPrompt, stats: stats } }];"
       },
       "id": "build-ai-prompt",
       "name": "Build AI Prompt",
@@ -149,7 +149,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({ model: 'gpt-4o-mini', max_tokens: 1024, messages: [{ role: 'user', content: $json.prompt }] }) }}",
+        "body": "={{ JSON.stringify({ model: 'gpt-4o-mini', max_tokens: 600, temperature: 0.2, messages: [{ role: 'system', content: $json.systemPrompt }, { role: 'user', content: $json.prompt }] }) }}",
         "options": {}
       },
       "id": "call-openai-02",

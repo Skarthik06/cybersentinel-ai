@@ -110,7 +110,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const metrics = $input.first().json;\nconst systemPrompt = 'You are a cybersecurity analyst. Write factual, data-driven executive reports.';\nconst userPrompt = 'Weekly security report ' + metrics.week_start + ' to ' + metrics.week_end + '.\\n\\nData:\\nAlerts=' + metrics.total_alerts + ' Incidents=' + metrics.total_incidents + ' Resolved=' + metrics.resolved_this_week + ' Blocked_IPs=' + metrics.blocked_ips + '\\nOpen: CRITICAL=' + metrics.open_critical + ' HIGH=' + metrics.open_high + ' MEDIUM=' + metrics.open_medium + ' LOW=' + metrics.open_low + '\\nTop threats: ' + metrics.top_threats + '\\nAvg response: ' + metrics.avg_response_time + ' min\\n\\nOutput exactly 5 labeled sections, under 400 words total:\\n1. Executive Summary\\n2. Key Threats\\n3. Response Effectiveness\\n4. Recommendations\\n5. Next Week Outlook';\nreturn [{ json: { prompt: userPrompt, systemPrompt: systemPrompt, metrics: metrics } }];"
+        "jsCode": "const metrics = $input.first().json;\nconst systemPrompt = 'You are the CISO presenting a weekly cybersecurity update to non-technical board members. Output exactly five labeled sections, total under 350 words, plain business language, no jargon, no markdown headers — just section name in CAPS then content.\\n\\n1. EXECUTIVE SUMMARY — 2 sentences: overall risk posture this week and whether it improved vs last week.\\n2. KEY THREATS — the dominant threat categories observed this week with counts. Translate technical terms (e.g., say \"command-and-control beacons\" not \"T1071.001\").\\n3. RESPONSE EFFECTIVENESS — cite the actual incident-resolved count, blocked-IP count, and average response time from the data. State whether the team is keeping up with volume.\\n4. RECOMMENDATIONS — three concrete actions the board should approve (budget, headcount, or policy). Each one tied to a specific risk seen in the data.\\n5. NEXT WEEK OUTLOOK — one sentence on the trend (escalating / steady / improving) plus what to watch for.\\n\\nUse only the values provided. If a metric is missing, say \"data unavailable\" — do not invent.';\nconst userPrompt = 'Week: ' + metrics.week_start + ' to ' + metrics.week_end + '\\n\\nMetrics:\\n- Total alerts: ' + metrics.total_alerts + '\\n- Active incidents: ' + metrics.total_incidents + '\\n- Resolved this week: ' + metrics.resolved_this_week + '\\n- Blocked IPs: ' + metrics.blocked_ips + '\\n- Open by severity: CRITICAL=' + metrics.open_critical + ' HIGH=' + metrics.open_high + ' MEDIUM=' + metrics.open_medium + ' LOW=' + metrics.open_low + '\\n- Top threats: ' + metrics.top_threats + '\\n- Avg response: ' + metrics.avg_response_time + ' min';\nreturn [{ json: { prompt: userPrompt, systemPrompt: systemPrompt, metrics: metrics } }];"
       },
       "id": "board-build-prompt",
       "name": "Build Board Prompt",
@@ -141,7 +141,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({ model: 'gpt-4o-mini', max_tokens: 800, temperature: 0.2, messages: [{ role: 'system', content: $json.systemPrompt }, { role: 'user', content: $json.prompt }] }) }}",
+        "body": "={{ JSON.stringify({ model: 'gpt-4o-mini', max_tokens: 600, temperature: 0.2, messages: [{ role: 'system', content: $json.systemPrompt }, { role: 'user', content: $json.prompt }] }) }}",
         "options": {}
       },
       "id": "call-openai-05",

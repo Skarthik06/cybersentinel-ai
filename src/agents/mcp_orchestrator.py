@@ -382,7 +382,13 @@ class MCPToolExecutor:
 
         description = args.get("description", "")
         evidence = args.get("evidence", "")
-        investigation_summary = f"{description}\n\nEvidence: {evidence}".strip() if evidence else description
+        # If the caller supplied a structured-JSON override (the new schema),
+        # store that as investigation_summary so the dashboard can render the
+        # rich panel. Otherwise fall back to the legacy "description + evidence"
+        # text blob.
+        investigation_summary = args.get("investigation_summary_override") or (
+            f"{description}\n\nEvidence: {evidence}".strip() if evidence else description
+        )
         block_recommended = bool(args.get("block_recommended", False))
         block_target_ip   = args.get("block_target_ip", "")
 
@@ -456,22 +462,30 @@ def _summarize_result(tool_name: str, result: str) -> str:
     if not result or result.startswith("No ") or result.startswith("Error"):
         return result[:80]
     if tool_name == "query_threat_database":
-        # First match line: MITRE + severity + pattern. 200 chars keeps key context
-        # for the LLM's "OBSERVED" + "THREAT" sections of the incident description.
-        return result.split("\n")[0][:200]
+        # Top 2 matches with MITRE + severity + pattern. Feeds OBSERVED + THREAT
+        # sections — wider context lets the LLM cite the actual matched signature
+        # rather than inventing one.
+        lines = [l for l in result.split("\n") if l.strip()]
+        return "\n".join(lines[:2])[:360]
     if tool_name == "get_host_profile":
-        # 250 chars keeps top peers, ports, MITRE history — feeds rich
-        # "WHY SUSPICIOUS" baseline-deviation analysis in the incident summary.
-        return result[:250]
+        # Full baseline including top peers, ports, MITRE history, avg bytes/min,
+        # avg entropy. The LLM needs concrete baseline numbers to write the
+        # "WHY THIS IS NOT NORMAL" paragraph.
+        return result[:450]
     if tool_name == "lookup_ip_reputation":
+        # Prefer the line containing confidence/AbuseIPDB, then fall back to the
+        # first 240 chars. Wider window keeps country, ISP, last-reported facts.
         for line in result.split("\n"):
             if "confidence=" in line or "AbuseIPDB" in line:
-                return line.strip()[:160]
-        return result[:120]
+                return line.strip()[:240]
+        return result[:240]
     if tool_name == "get_recent_alerts":
+        # 5 most-recent alerts from this IP (was 3). Shows progression — e.g.,
+        # scan → brute force → C2 — which is the "kill chain" signal the LLM uses
+        # to assign HIGH-confidence intent.
         lines = [l for l in result.split("\n") if l.strip()]
-        return "\n".join(lines[:3])[:240]
-    return result[:120]
+        return "\n".join(lines[:5])[:420]
+    return result[:160]
 
 
 class InvestigateAgent:
@@ -550,9 +564,14 @@ class InvestigateAgent:
                 messages=[{"role": "user", "content": intel_context}],
                 tools=None,
                 system=ANALYSIS_SYSTEM_PROMPT,
-                # 768 leaves headroom for full 4-section description + evidence in JSON.
-                # Description = OBSERVED + WHY SUSPICIOUS + THREAT + PROFILE (~400-500 out tokens).
-                max_tokens=768,
+                # Structured JSON output (short fields, no prose) needs much less budget
+                # than the old 5-paragraph format. Typical real output: ~350-500 tokens.
+                # 800 leaves headroom for long evidence_metrics or extra observed bullets.
+                # Cost on gpt-4o-mini: ~$0.0004 per investigation.
+                max_tokens=800,
+                # OpenAI JSON mode — guarantees valid JSON, lets us trust the parse and
+                # drop "no markdown / no preamble" instructions from the prompt.
+                response_format={"type": "json_object"},
             )
             raw_text = response.text.strip() if response.text else ""
         except Exception as llm_err:
@@ -561,36 +580,36 @@ class InvestigateAgent:
 
         # ── Step 4: Parse JSON verdict ─────────────────────────────────────
 
-        # Strip markdown code fences if the model wraps its output
+        # Strip markdown code fences if the model wraps its output (rare with
+        # response_format=json_object but kept as defence-in-depth).
         if raw_text.startswith("```"):
             raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
             raw_text = re.sub(r"\s*```$",          "", raw_text).strip()
 
-        verdict = {}
+        verdict: Dict[str, Any] = {}
         try:
             verdict = json.loads(raw_text)
         except (json.JSONDecodeError, ValueError):
             logger.warning(f"⚠️ LLM returned non-JSON for {alert_type} — using fallback incident")
-            verdict = {
-                "title":            f"{alert_type} — Auto-Investigation",
-                "severity":         alert.get("severity", "MEDIUM"),
-                "mitre_technique":  alert.get("mitre_technique", "Unknown"),
-                "description":      raw_text[:500] if raw_text else "Investigation incomplete — LLM parse error",
-                "evidence":         "",
-                "affected_ips":     [src_ip],
-                "mitre_techniques": [alert.get("mitre_technique", "")],
-                "block_recommended": False,
-            }
+            verdict = self._rule_based_verdict(alert)
 
-        description = verdict.get("description", "")
-        evidence    = verdict.get("evidence", "")
-        analysis    = f"{description}\n\nEvidence: {evidence}".strip() if evidence else description
+        # ── Step 4a: Compose human-readable description from structured fields ─
+        # The DB description column drives the threat-feed card preview. We build
+        # it from the structured verdict so legacy renderers still get good text;
+        # the rich UI uses the full structured JSON saved in investigation_summary.
+        description = self._compose_description(verdict)
+        evidence    = self._compose_evidence_line(verdict)
+
+        # ── Step 4b: Create incident — investigation_summary holds the full
+        # structured JSON; the dashboard parses it for the rich Investigation panel.
+        # Plain-text fallback views call .replace(/^\{.*\}$/, '') and fall through
+        # to the description column.
+        verdict_for_storage = json.dumps(verdict, separators=(",", ":"))
 
         # Determine whether analyst should review this for blocking
         block_recommended = bool(verdict.get("block_recommended")) or verdict.get("severity") == "CRITICAL"
         block_target_ip   = dst_ip or src_ip
 
-        # ── Step 4b: Create incident directly (no LLM round-trip) ─────────
         create_result = await self.executor._create_incident({
             "title":             verdict.get("title",            f"{alert_type} Incident"),
             "severity":          verdict.get("severity",         alert.get("severity", "MEDIUM")),
@@ -601,7 +620,9 @@ class InvestigateAgent:
             "block_recommended": block_recommended,
             "block_target_ip":   block_target_ip,
             "source":            source,  # already extracted above — simulator or dpi
+            "investigation_summary_override": verdict_for_storage,
         })
+        analysis = verdict_for_storage  # keep _log_alert's 'analysis' as the structured JSON
 
         # Parse the generated incident ID for logging
         id_match    = re.search(r"INC-\d+", create_result)
@@ -619,81 +640,117 @@ class InvestigateAgent:
             "llm_provider": self.llm.name(),
         }
 
+    def _compose_description(self, v: Dict[str, Any]) -> str:
+        """Build a human-readable plain-text incident description from the
+        structured verdict. Used by the threat-feed card preview and any
+        renderer that doesn't parse the JSON. Mirrors what the rich UI shows
+        but flattened to text."""
+        verdict = (v.get("verdict") or "").strip()
+        observed   = v.get("observed")   or []
+        deviation  = v.get("deviation")  or []
+        ta = v.get("threat_assessment") or {}
+        ap = v.get("attacker_profile")  or {}
+        confidence = v.get("confidence", "MEDIUM")
+
+        def _bullets(items, label):
+            if not items: return ""
+            joined = "\n".join(f"- {str(x).strip()}" for x in items if str(x).strip())
+            return f"{label}:\n{joined}" if joined else ""
+
+        parts = []
+        if verdict: parts.append(f"VERDICT: {verdict}")
+        obs = _bullets(observed, "OBSERVED");   parts.append(obs)   if obs else None
+        dev = _bullets(deviation, "WHY THIS IS NOT NORMAL"); parts.append(dev) if dev else None
+        if ta:
+            ta_line = f"THREAT ASSESSMENT: {ta.get('intent', '').strip()}"
+            if ta.get("objective"):           ta_line += f" (objective: {ta['objective']})"
+            if ta.get("confidence_reasoning"):ta_line += f"\nConfidence: {confidence} — {ta['confidence_reasoning']}"
+            parts.append(ta_line.strip())
+        if ap:
+            cat = ap.get("category", "Unknown"); rat = ap.get("rationale", "")
+            parts.append(f"ATTACKER PROFILE: {cat} — {rat}".strip())
+        return "\n\n".join(p for p in parts if p)
+
+    def _compose_evidence_line(self, v: Dict[str, Any]) -> str:
+        """One-line evidence string for the incidents.evidence column. Renders
+        null as 'n/a' so weak intel is visible rather than masquerading as 0."""
+        m = v.get("evidence_metrics") or {}
+        def _fmt(key, label, suffix=""):
+            val = m.get(key)
+            if val is None: return f"{label}=n/a"
+            return f"{label}={val}{suffix}"
+        parts = [
+            _fmt("anomaly_score", "score"),
+            _fmt("entropy", "entropy"),
+            _fmt("bytes_per_min", "bytes/min"),
+            _fmt("primary_port", "port"),
+        ]
+        proto = m.get("protocol")
+        if proto: parts.append(f"proto={proto}")
+        parts.append(_fmt("abuseipdb_confidence", "abuseipdb", "%"))
+        parts.append(_fmt("peer_count", "peers"))
+        return ", ".join(parts)
+
     def _rule_based_verdict(self, alert: Dict) -> Dict:
         """
         Deterministic rule-based investigation fallback used when the LLM API is
-        unavailable. Generates a structured verdict from alert fields alone — no
-        external calls. Ensures incidents are always created even during LLM outages.
-
-        Rules:
-          - CRITICAL + anomaly_score > 0.8  → block_recommended=True, HIGH confidence
-          - CRITICAL                         → block_recommended=True, MEDIUM confidence
-          - HIGH + known MITRE              → block_recommended=True, MEDIUM confidence
-          - MEDIUM / LOW                    → block_recommended=False, LOW confidence
+        unavailable. Returns the SAME structured schema the LLM would have
+        produced, so downstream code doesn't need a fallback path.
         """
-        sev          = alert.get("severity", "MEDIUM")
-        alert_type   = alert.get("type", "UNKNOWN")
-        anomaly      = float(alert.get("anomaly_score", 0.0))
-        mitre        = alert.get("mitre_technique", "")
-        src_ip       = alert.get("src_ip", "unknown")
-        dst_ip       = alert.get("dst_ip", "")
-
-        _block_sevs = {"CRITICAL", "HIGH"}
-        block_rec   = sev in _block_sevs
+        sev        = alert.get("severity", "MEDIUM")
+        alert_type = alert.get("type", "UNKNOWN")
+        anomaly    = float(alert.get("anomaly_score", 0.0))
+        mitre      = alert.get("mitre_technique") or "Unknown"
+        src_ip     = alert.get("src_ip", "unknown")
+        dst_ip     = alert.get("dst_ip", "")
+        proto      = alert.get("protocol", "TCP")
+        port       = alert.get("dst_port")
+        entropy    = alert.get("entropy")
 
         if sev == "CRITICAL" and anomaly > 0.8:
-            confidence  = "HIGH"
-            description = (
-                f"OBSERVED: {alert_type} from {src_ip} to {dst_ip or 'unknown'} "
-                f"with anomaly score {anomaly:.3f}.\n"
-                f"WHY SUSPICIOUS: Anomaly score {anomaly:.3f} exceeds CRITICAL threshold "
-                f"and behavioral profile matches high-confidence threat pattern.\n"
-                f"THREAT ASSESSMENT: Active threat — {mitre or 'technique TBD'} — HIGH confidence. "
-                f"Immediate analyst review required.\n"
-                f"ATTACKER PROFILE: Determined adversary — pattern matches known APT/targeted attack TTPs."
-            )
+            confidence, category = "HIGH", "Targeted APT"
         elif sev == "CRITICAL":
-            confidence  = "MEDIUM"
-            description = (
-                f"OBSERVED: {alert_type} from {src_ip} — severity CRITICAL, "
-                f"anomaly score {anomaly:.3f}.\n"
-                f"WHY SUSPICIOUS: Critical severity threshold triggered with "
-                f"{'MITRE ' + mitre if mitre else 'behavioral anomaly'}.\n"
-                f"THREAT ASSESSMENT: Likely malicious — {mitre or 'TBD'} — MEDIUM confidence. "
-                f"[NOTE: LLM unavailable — rule-based assessment]\n"
-                f"ATTACKER PROFILE: Unknown — insufficient context for full classification."
-            )
+            confidence, category = "MEDIUM", "Unknown"
         elif sev == "HIGH":
-            confidence  = "MEDIUM"
-            description = (
-                f"OBSERVED: {alert_type} from {src_ip} — severity HIGH, "
-                f"anomaly score {anomaly:.3f}.\n"
-                f"WHY SUSPICIOUS: High-severity behavioral indicator triggered "
-                f"{'— ' + mitre if mitre else ''}.\n"
-                f"THREAT ASSESSMENT: Suspicious activity — MEDIUM confidence. "
-                f"[NOTE: LLM unavailable — rule-based assessment]\n"
-                f"ATTACKER PROFILE: Unknown — analyst review recommended."
-            )
+            confidence, category = "MEDIUM", "Opportunistic Scanner"
         else:
-            confidence  = "LOW"
-            description = (
-                f"OBSERVED: {alert_type} from {src_ip} — severity {sev}.\n"
-                f"WHY SUSPICIOUS: Anomaly threshold triggered (score={anomaly:.3f}).\n"
-                f"THREAT ASSESSMENT: Low-medium severity — LOW confidence. "
-                f"[NOTE: LLM unavailable — rule-based assessment]\n"
-                f"ATTACKER PROFILE: Likely automated scanner or misconfigured host."
-            )
+            confidence, category = "LOW", "Misconfigured Internal"
 
         return {
-            "title":             f"{alert_type} — {sev} [Rule-Based]",
-            "severity":          sev,
-            "mitre_technique":   mitre,
-            "mitre_techniques":  [mitre] if mitre else [],
-            "description":       description,
-            "evidence":          f"anomaly_score={anomaly:.3f} src={src_ip} dst={dst_ip} confidence={confidence}",
-            "affected_ips":      [src_ip],
-            "block_recommended": block_rec,
-            "block_target_ip":   dst_ip or src_ip,
+            "title":            f"{mitre} {alert_type} — host {src_ip}",
+            "severity":         sev,
+            "confidence":       confidence,
+            "mitre_technique":  mitre,
+            "mitre_techniques": [mitre] if mitre and mitre != "Unknown" else [],
+            "kill_chain_phase": "Command & Control" if "C2" in alert_type else "Discovery",
+            "affected_ips":     [src_ip] + ([dst_ip] if dst_ip else []),
+            "verdict":          f"{alert_type} from {src_ip} to {dst_ip or 'unknown'} (anomaly score {anomaly:.2f}) — LLM unavailable, rule-based verdict.",
+            "observed": [
+                f"Alert type: {alert_type}",
+                f"Source: {src_ip}, destination: {dst_ip or 'unknown'}",
+                f"Anomaly score {anomaly:.2f}, severity {sev}",
+            ],
+            "deviation": ["LLM unavailable — no baseline comparison performed."],
+            "threat_assessment": {
+                "objective":            "C2" if "C2" in alert_type else "Discovery",
+                "intent":               f"Likely {sev.lower()}-impact activity matching {mitre}.",
+                "confidence_reasoning": "Rule-based fallback (LLM unreachable); confidence reflects severity tier only.",
+            },
+            "attacker_profile": {
+                "category":  category,
+                "rationale": "Inferred from severity tier and alert type only.",
+            },
+            "evidence_metrics": {
+                "anomaly_score":        anomaly if anomaly else None,
+                "entropy":              entropy,
+                "bytes_per_min":        None,
+                "primary_port":         port,
+                "protocol":             proto,
+                "abuseipdb_confidence": None,
+                "peer_count":           None,
+                "recent_alerts_count":  0,
+            },
+            "block_recommended": sev in {"CRITICAL", "HIGH"},
         }
 
     async def _chat_with_retry(self, **kwargs) -> "LLMResponse":
@@ -842,11 +899,13 @@ class MCPOrchestrator:
                     else:
                         await self._log_alert(alert)
                 elif priority == 2:  # MEDIUM — once per IP per 30 min
-                    if now - self._medium_last_seen.get(src_ip, 0) > 1800:
+                    # MEDIUM dedup window: investigate once per 5 min per src_ip
+                    # (was 30 min — too slow, made the dashboard feel stale).
+                    if now - self._medium_last_seen.get(src_ip, 0) > 300:
                         self._medium_last_seen[src_ip] = now
                         if not self.alert_queue.full():
                             await self.alert_queue.put((priority, alert))
-                            logger.info(f"📥 Queued MEDIUM alert from {src_ip} (first in 30min)")
+                            logger.info(f"📥 Queued MEDIUM alert from {src_ip} (first in 5min)")
                     else:
                         await self._log_alert(alert)
                 else:

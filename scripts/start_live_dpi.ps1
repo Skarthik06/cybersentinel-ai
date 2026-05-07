@@ -1,11 +1,27 @@
 # CyberSentinel AI - Live DPI Sensor: Auto-Setup and Launcher
 # Handles: Admin elevation, Npcap install, pip packages, Docker start, sensor run
-# Usage: Double-click Start Live DPI.bat  OR run this file directly in PowerShell
+# Usage: Double-click "Start Live DPI.bat"  OR run this file directly in PowerShell
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "Requesting Administrator privileges..." -ForegroundColor Yellow
-    Start-Process PowerShell -Verb RunAs -ArgumentList "-ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    # -NoExit keeps the elevated child window open so any error stays visible
+    Start-Process PowerShell -Verb RunAs -ArgumentList "-NoExit -ExecutionPolicy Bypass -File `"$PSCommandPath`""
     exit
+}
+
+# Trap any unhandled error so the window stays open and shows the failure.
+trap {
+    Write-Host ""
+    Write-Host "============================================================" -ForegroundColor Red
+    Write-Host "  SCRIPT FAILED" -ForegroundColor Red
+    Write-Host "============================================================" -ForegroundColor Red
+    Write-Host $_ -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Line: $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor Yellow
+    Write-Host "Command: $($_.InvocationInfo.Line.Trim())" -ForegroundColor Yellow
+    Write-Host ""
+    Read-Host "Press Enter to close"
+    exit 1
 }
 
 $ErrorActionPreference = "Stop"
@@ -28,7 +44,7 @@ try {
     if ($LASTEXITCODE -eq 0) { Write-OK "$pyVer" } else { throw }
 } catch {
     Write-Fail "Python not found in PATH."
-    Write-Warn "Download from https://python.org and check Add Python to PATH during install."
+    Write-Warn "Download from https://python.org and check 'Add Python to PATH' during install."
     Read-Host "`nPress Enter to exit"
     exit 1
 }
@@ -51,7 +67,7 @@ if ($npcapInstalled) {
         Write-OK "Npcap installed."
     } catch {
         Write-Fail "Npcap install failed: $_"
-        Write-Warn "Install manually from https://npcap.com and check WinPcap API-compatible mode."
+        Write-Warn "Install manually from https://npcap.com and check 'WinPcap API-compatible mode'."
         Read-Host "`nPress Enter to exit"
         exit 1
     }
@@ -98,7 +114,7 @@ if (-not $dockerOk) {
     Write-OK "Docker running."
 }
 
-# STEP 5: Start stack if not running
+# STEP 5: Start stack if not running, then wait for Kafka to be healthy
 Write-Step "Checking CyberSentinel stack"
 Set-Location $ProjectRoot
 $kafkaUp = docker compose ps --status running 2>&1 | Select-String "cybersentinel-kafka"
@@ -107,10 +123,26 @@ if ($kafkaUp) {
 } else {
     Write-Warn "Starting docker compose stack..."
     docker compose up -d 2>&1 | Out-Null
-    Write-Warn "Waiting 30s for services to start..."
-    Start-Sleep 30
-    Write-OK "Stack started."
 }
+
+# Wait until Kafka reports healthy (cold start can take 60-120s).
+Write-Warn "Waiting for Kafka to become healthy..."
+$waited = 0
+$kafkaHealthy = $false
+do {
+    Start-Sleep 5
+    $waited += 5
+    $health = docker inspect --format='{{.State.Health.Status}}' cybersentinel-kafka 2>$null
+    if ($health -eq "healthy") { $kafkaHealthy = $true; break }
+    Write-Host "  ...still waiting ($waited s, status=$health)" -ForegroundColor DarkGray
+} while ($waited -lt 180)
+
+if (-not $kafkaHealthy) {
+    Write-Fail "Kafka did not become healthy in 180s. Run: docker compose logs kafka"
+    Read-Host "Press Enter to exit"
+    exit 1
+}
+Write-OK "Kafka healthy."
 
 # STEP 6: Start N8N (auto, no user action needed)
 Write-Step "Starting N8N"
@@ -127,8 +159,8 @@ if ($n8nRunning -eq "N8N") {
     if ($n8nCheck -eq "N8N") {
         Write-OK "N8N started at http://localhost:5678"
     } else {
-        # Container may be stale/missing — recreate it from start_n8n.ps1
-        Write-Warn "N8N container not found — recreating..."
+        # Container may be stale or missing - recreate it from start_n8n.ps1
+        Write-Warn "N8N container not found - recreating..."
         & "$PSScriptRoot\start_n8n.ps1"
     }
 }
@@ -148,13 +180,19 @@ Write-Host "Active network adapters:" -ForegroundColor Cyan
 Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.Name -notlike "vEthernet*" } |
     ForEach-Object { Write-Host "   * $($_.Name)  ($($_.InterfaceDescription))" -ForegroundColor White }
 
-# STEP 8: Launch sensor
+# STEP 9: Launch sensor
 Write-Step "Launching Live DPI Sensor"
 $env:PYTHONPATH        = $ProjectRoot
 $env:KAFKA_BOOTSTRAP   = "localhost:9092"
 $env:REDIS_URL         = "redis://:$redisPassword@localhost:6379"
 $env:CAPTURE_INTERFACE = "auto"
-$env:BPF_FILTER        = "ip and not (net 192.168.65.0/24) and not (net 172.16.0.0/12)"
+# Exclude:
+#   - Docker Desktop bridges (192.168.65.0/24, 172.16.0.0/12)
+#   - Multicast destinations (224.0.0.0/4) - sent at periodic intervals by mDNS,
+#     SSDP, IGMP, NTP, etc. Their fixed-cadence pattern was being mis-flagged as
+#     C2 beaconing, flooding the alert pipeline with false positives.
+#   - Limited broadcast (255.255.255.255) - same reason.
+$env:BPF_FILTER        = "ip and not (net 192.168.65.0/24) and not (net 172.16.0.0/12) and not (dst net 224.0.0.0/4) and not (dst host 255.255.255.255)"
 
 Write-Host "  Kafka:     localhost:9092" -ForegroundColor White
 Write-Host "  Redis:     localhost:6379" -ForegroundColor White
