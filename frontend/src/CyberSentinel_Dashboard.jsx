@@ -1,5 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, RadarChart, Radar, PolarGrid, PolarAngleAxis } from "recharts";
+import { Aurora } from "@/components/ui/aurora";
+import { DecryptedText } from "@/components/ui/decrypted-text";
+import { ShinyText } from "@/components/ui/shiny-text";
+import { StarBorder } from "@/components/ui/star-border";
+import { ClickSpark } from "@/components/ui/click-spark";
 
 const API = "";
 
@@ -657,6 +662,9 @@ export default function SOCDashboard() {
 
       {/* Background */}
       <canvas ref={waterCanvasRef} style={{ position:"fixed",inset:0,zIndex:0,width:"100%",height:"100%",pointerEvents:"none" }}/>
+      {/* Aurora glow + click sparks (ReactBits) */}
+      <Aurora style={{ position:"fixed",inset:0,zIndex:1,pointerEvents:"none" }} />
+      <ClickSpark sparkColor="#00E5FF" />
       <div className="hex-bg" style={{ position:"fixed",inset:0,zIndex:1,pointerEvents:"none",
         backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='100'%3E%3Cpolygon points='28,2 54,16 54,44 28,58 2,44 2,16' fill='none' stroke='%2300B0FF' stroke-width='0.6'/%3E%3Cpolygon points='28,52 54,66 54,94 28,108 2,94 2,66' fill='none' stroke='%2300B0FF' stroke-width='0.6'/%3E%3C/svg%3E")`,
         backgroundSize:"56px 100px" }}/>
@@ -666,7 +674,9 @@ export default function SOCDashboard() {
 
       {/* Centered login card */}
       <div style={{ position:"relative",zIndex:5 }}>
-        <div className="water-card" style={{
+        <div className="water-card"
+          onMouseMove={e => { const r = e.currentTarget.getBoundingClientRect(); e.currentTarget.style.setProperty('--mx', (e.clientX - r.left) + 'px'); e.currentTarget.style.setProperty('--my', (e.clientY - r.top) + 'px'); }}
+          style={{
           width:"100%", maxWidth:400, position:"relative",
           background:"rgba(2,10,22,0.88)", backdropFilter:"blur(24px) saturate(160%)",
           WebkitBackdropFilter:"blur(24px) saturate(160%)",
@@ -674,6 +684,9 @@ export default function SOCDashboard() {
           overflow:"hidden",
           boxShadow:"0 8px 40px rgba(0,0,0,0.7), 0 0 60px rgba(0,100,200,0.15), inset 0 1px 0 rgba(0,229,255,0.08)",
         }}>
+          {/* Cursor-follow spotlight glow (ReactBits SpotlightCard) */}
+          <div style={{ position:"absolute", inset:0, zIndex:11, pointerEvents:"none", borderRadius:14,
+            background:"radial-gradient(340px circle at var(--mx,50%) var(--my,-120px), rgba(0,229,255,0.14), transparent 60%)" }}/>
           {/* Scan beam */}
           <div style={{ position:"absolute",left:0,right:0,height:2,zIndex:10,pointerEvents:"none",
             background:"linear-gradient(90deg,transparent,rgba(0,229,255,0.6),transparent)",
@@ -704,8 +717,8 @@ export default function SOCDashboard() {
             display:"flex",alignItems:"center",gap:10 }}>
             <div className="s-dot" style={{ width:7,height:7,borderRadius:"50%",flexShrink:0,
               background:"#00E5FF",boxShadow:"0 0 10px #00E5FF,0 0 20px rgba(0,229,255,0.4)" }}/>
-            <span className="holo-title" style={{ fontFamily:"'Orbitron',monospace",fontSize:9,
-              letterSpacing:3,fontWeight:700 }}>SECURE ACCESS TERMINAL</span>
+            <DecryptedText text="SECURE ACCESS TERMINAL" className="holo-title" speed={40}
+              style={{ fontFamily:"'Orbitron',monospace",fontSize:9, letterSpacing:3,fontWeight:700 }} />
             <span style={{ marginLeft:"auto",fontFamily:"monospace",fontSize:7,
               color:"rgba(0,176,255,0.4)",letterSpacing:1 }}>v1.3.0</span>
           </div>
@@ -729,7 +742,7 @@ export default function SOCDashboard() {
                   <span style={{ fontSize:8,color:"rgba(0,176,255,0.5)",letterSpacing:2,
                     fontFamily:"'Share Tech Mono',monospace" }}>{lbl}</span>
                   <span style={{ fontSize:7,color:"rgba(0,176,255,0.25)",fontFamily:"monospace" }}>
-                    {isPass?"&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;":"REQUIRED"}
+                    {isPass?"••••••":"REQUIRED"}
                   </span>
                 </div>
                 <input
@@ -753,18 +766,20 @@ export default function SOCDashboard() {
                 <span style={{ fontSize:14 }}>!</span> {loginError}
               </div>
             )}
-            <button onClick={login} disabled={loading}
-              onMouseEnter={e=>{ e.currentTarget.style.background="linear-gradient(135deg,rgba(0,176,255,0.25),rgba(0,100,200,0.3))"; e.currentTarget.style.boxShadow="0 0 32px rgba(0,176,255,0.5)"; }}
-              onMouseLeave={e=>{ e.currentTarget.style.background="linear-gradient(135deg,rgba(0,80,160,0.3),rgba(0,40,100,0.2))"; e.currentTarget.style.boxShadow="0 0 16px rgba(0,176,255,0.2)"; }}
-              style={{ width:"100%",padding:"13px",cursor:loading?"wait":"pointer",
-                background:"linear-gradient(135deg,rgba(0,80,160,0.3),rgba(0,40,100,0.2))",
-                border:"1px solid rgba(0,176,255,0.45)",borderRadius:7,
-                color:"#00E5FF",fontFamily:"'Share Tech Mono',monospace",
-                fontSize:11,letterSpacing:3,
-                boxShadow:"0 0 16px rgba(0,176,255,0.2)",
-                transition:"all 0.2s",position:"relative",overflow:"hidden" }}>
-              {loading ? "AUTHENTICATING..." : "INITIALIZE ACCESS"}
-            </button>
+            <StarBorder color="#00E5FF" speed={6} radius={8} style={{ width:"100%" }}>
+              <button onClick={login} disabled={loading}
+                onMouseEnter={e=>{ e.currentTarget.style.background="linear-gradient(135deg,rgba(0,176,255,0.25),rgba(0,100,200,0.3))"; e.currentTarget.style.boxShadow="0 0 32px rgba(0,176,255,0.5)"; }}
+                onMouseLeave={e=>{ e.currentTarget.style.background="linear-gradient(135deg,rgba(0,80,160,0.3),rgba(0,40,100,0.2))"; e.currentTarget.style.boxShadow="0 0 16px rgba(0,176,255,0.2)"; }}
+                style={{ width:"100%",padding:"13px",cursor:loading?"wait":"pointer",
+                  background:"linear-gradient(135deg,rgba(0,80,160,0.3),rgba(0,40,100,0.2))",
+                  border:"1px solid rgba(0,176,255,0.45)",borderRadius:7,
+                  fontFamily:"'Share Tech Mono',monospace",
+                  fontSize:11,letterSpacing:3,
+                  boxShadow:"0 0 16px rgba(0,176,255,0.2)",
+                  transition:"all 0.2s",position:"relative",overflow:"hidden" }}>
+                {loading ? <span style={{ color:"#00E5FF" }}>AUTHENTICATING...</span> : <ShinyText text="INITIALIZE ACCESS" speed={4} />}
+              </button>
+            </StarBorder>
             <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",
               marginTop:14,paddingTop:12,borderTop:"1px solid rgba(0,176,255,0.08)" }}>
               <div>

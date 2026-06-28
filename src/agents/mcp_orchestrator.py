@@ -1024,7 +1024,8 @@ class MCPOrchestrator:
             }
             async with self.db_pool.acquire() as conn:
                 alert_row = await conn.fetchrow("""
-                    SELECT type, severity, dst_ip, anomaly_score, mitre_technique, description
+                    SELECT type, severity, host(dst_ip) AS dst_ip, anomaly_score,
+                           mitre_technique, description
                     FROM alerts WHERE src_ip = $1 AND source = $2
                     ORDER BY timestamp DESC LIMIT 1
                 """, src_ip, source)
@@ -1047,7 +1048,7 @@ class MCPOrchestrator:
             )
 
             intel_context = (
-                f"Alert: {json.dumps(alert_slim, separators=(',', ':'))}\n\n"
+                f"Alert: {json.dumps(alert_slim, separators=(',', ':'), default=str)}\n\n"
                 f"Intel:\n"
                 f"- Threat DB: {_summarize_result('query_threat_database', threat_raw)}\n"
                 f"- Host profile: {_summarize_result('get_host_profile', host_raw)}\n"
@@ -1056,14 +1057,14 @@ class MCPOrchestrator:
             )
 
             try:
-                response = await self._chat_with_retry(
+                response = await self.investigate_agent._chat_with_retry(
                     messages=[{"role": "user", "content": intel_context}],
                     tools=None, system=ANALYSIS_SYSTEM_PROMPT, max_tokens=768,
                 )
                 raw_text = response.text.strip() if response.text else ""
             except Exception as llm_err:
                 logger.error(f"LLM unavailable for backlog reinvestigation {incident_id}: {llm_err}")
-                raw_text = json.dumps(self._rule_based_verdict(alert))
+                raw_text = json.dumps(self.investigate_agent._rule_based_verdict(alert))
 
             if raw_text.startswith("```"):
                 raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
@@ -1072,7 +1073,7 @@ class MCPOrchestrator:
             try:
                 verdict = json.loads(raw_text)
             except (json.JSONDecodeError, ValueError):
-                verdict = self._rule_based_verdict(alert)
+                verdict = self.investigate_agent._rule_based_verdict(alert)
 
             description       = verdict.get("description", "")
             evidence          = verdict.get("evidence", "")

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { SplineScene } from "@/components/ui/splite";
 
 const API = "http://localhost:8080";
 
@@ -343,88 +344,12 @@ export default function LandingPage() {
             alignItems:"center",justifyContent:"center",gap:28,padding:"60px 44px",
             animation:"fadeSlideR 0.85s 0.15s ease both" }}>
 
-            {/* Robot */}
-            <div style={{ position:"relative",width:220,height:290 }}>
-              <svg style={{ position:"absolute",inset:"-38px",
-                width:"calc(100% + 76px)",height:"calc(100% + 76px)",overflow:"visible",zIndex:1 }}
-                viewBox="0 0 296 368">
-                <circle cx="148" cy="184" r="132" fill="none" stroke="rgba(21,101,192,0.09)" strokeWidth="1"/>
-                <circle cx="148" cy="184" r="106" fill="none" stroke="rgba(79,195,247,0.08)" strokeWidth="0.8"/>
-                <circle cx="148" cy="184" r="80" fill="none" stroke="rgba(79,195,247,0.06)" strokeWidth="0.7"/>
-                <g className="radar-arm">
-                  <line x1="148" y1="184" x2="148" y2="78" stroke="rgba(79,195,247,0.4)" strokeWidth="1.5" strokeLinecap="round"/>
-                  <path d="M148,184 L148,78 A106,106 0 0,1 240,222 Z" fill="rgba(79,195,247,0.04)"/>
-                </g>
-                <circle cx="148" cy="78" r="4.5" fill="#4FC3F7" className="p-dot" style={{ transformOrigin:"148px 78px" }}/>
-                <circle cx="244" cy="202" r="3.5" fill="#4FC3F7" className="p-dot" style={{ transformOrigin:"244px 202px",animationDelay:"0.9s" }}/>
-                <circle cx="76" cy="262" r="3" fill="#00E676" className="p-dot" style={{ transformOrigin:"76px 262px",animationDelay:"1.7s" }}/>
-                <circle cx="222" cy="98" r="3" fill="#FF6D00" className="p-dot" style={{ transformOrigin:"222px 98px",animationDelay:"0.4s" }}/>
-              </svg>
-
-              <svg className="robot-float" viewBox="0 0 200 288"
-                style={{ width:"100%",height:"100%",position:"relative",zIndex:2 }}>
-                <defs>
-                  <filter id="rf1"><feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-                  <filter id="rf2"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-                  <linearGradient id="rbG" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#0D2137"/><stop offset="100%" stopColor="#060F1A"/></linearGradient>
-                  <linearGradient id="rsG" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#010C16"/><stop offset="100%" stopColor="#020810"/></linearGradient>
-                  <clipPath id="rChest"><rect x="50" y="143" width="100" height="72"/></clipPath>
-                </defs>
-                {/* Antenna */}
-                <line x1="100" y1="50" x2="100" y2="26" stroke="#263238" strokeWidth="2.5" strokeLinecap="round"/>
-                <line x1="100" y1="34" x2="115" y2="24" stroke="#263238" strokeWidth="1.5" strokeLinecap="round"/>
-                <circle cx="100" cy="22" r="5.5" fill="#FF1744" filter="url(#rf1)" className="ant-led"/>
-                <circle cx="116" cy="21" r="3.2" fill="#FF6D00" filter="url(#rf1)" className="ant-led2"/>
-                {/* Head */}
-                <rect x="52" y="50" width="96" height="72" rx="11" fill="url(#rbG)" stroke="#1565C0" strokeWidth="1.5"/>
-                <rect x="52" y="50" width="96" height="24" rx="11" fill="rgba(79,195,247,0.04)"/>
-                <rect x="68" y="55" width="64" height="3" rx="1.5" fill="rgba(79,195,247,0.18)"/>
-                <circle cx="100" cy="61" r="2.2" fill="rgba(79,195,247,0.45)"/>
-                <line x1="68" y1="61" x2="90" y2="61" stroke="rgba(79,195,247,0.18)" strokeWidth="0.8"/>
-                <line x1="110" y1="61" x2="132" y2="61" stroke="rgba(79,195,247,0.18)" strokeWidth="0.8"/>
-                {/* Left eye */}
-                <ellipse cx="78" cy="79" rx="13" ry="11" fill="#010E18" stroke="#00E676" strokeWidth="1.5" filter="url(#rf1)"/>
-                <ellipse cx="78" cy="79" rx="8" ry="7" fill="#00C853" className="eye-p" filter="url(#rf1)"/>
-                <circle cx="80" cy="77" r="2.5" fill="#AFFFCC" opacity="0.9"/>
-                {/* Right eye */}
-                <ellipse cx="122" cy="79" rx="13" ry="11" fill="#010E18" stroke="#00E676" strokeWidth="1.5" filter="url(#rf1)"/>
-                <ellipse cx="122" cy="79" rx="8" ry="7" fill="#00C853" className="eye-p2" filter="url(#rf1)"/>
-                <circle cx="124" cy="77" r="2.5" fill="#AFFFCC" opacity="0.9"/>
-                {/* Mouth */}
-                <rect x="66" y="103" width="68" height="11" rx="5.5" fill="#010E18" stroke="#0D47A1" strokeWidth="1"/>
-                {[73,80,87,94,101,108,115,122,129].map((x,i) => (
-                  <rect key={i} x={x} y="106" width="2.2" height="5" rx="1" fill={i%3===0?"#1565C0":"rgba(13,71,161,0.5)"}/>
-                ))}
-                {/* Neck */}
-                <rect x="86" y="122" width="28" height="20" rx="4" fill="url(#rsG)" stroke="#0D47A1" strokeWidth="1"/>
-                {[89,95,101,107].map((x,i) => <rect key={i} x={x} y="125" width="2" height="14" rx="1" fill="rgba(13,71,161,0.6)"/>)}
-                {/* Body */}
-                <rect x="34" y="140" width="132" height="96" rx="14" fill="url(#rbG)" stroke="#1565C0" strokeWidth="1.5"/>
-                <rect x="50" y="143" width="100" height="72" rx="8" fill="#010C16" stroke="#0D47A1" strokeWidth="1" clipPath="url(#rChest)"/>
-                <rect x="56" y="149" width="88" height="60" rx="6" fill="#020D1A" clipPath="url(#rChest)"/>
-                {/* Chest beam */}
-                <rect x="56" y="149" width="88" height="3" rx="1.5" fill="rgba(0,176,255,0.6)" className="c-beam"/>
-                {/* Chest indicators */}
-                <circle cx="66" cy="200" r="5" fill="#00E676" filter="url(#rf1)" style={{ animation:"eyePulse 1.4s ease-in-out infinite" }}/>
-                <circle cx="80" cy="200" r="5" fill="#FF6D00" filter="url(#rf1)" style={{ animation:"eyePulse 1.4s ease-in-out 0.35s infinite" }}/>
-                <circle cx="94" cy="200" r="5" fill="#1565C0" filter="url(#rf1)" style={{ animation:"eyePulse 1.4s ease-in-out 0.7s infinite" }}/>
-                {/* Left arm */}
-                <rect x="6" y="147" width="28" height="70" rx="10" fill="url(#rbG)" stroke="#1565C0" strokeWidth="1.2"/>
-                <rect x="10" y="155" width="20" height="3" rx="1.5" fill="rgba(79,195,247,0.2)"/>
-                <rect x="10" y="162" width="20" height="3" rx="1.5" fill="rgba(79,195,247,0.12)"/>
-                <circle cx="20" cy="210" r="7" fill="#010E18" stroke="#0D47A1" strokeWidth="1"/>
-                {/* Right arm */}
-                <rect x="166" y="147" width="28" height="70" rx="10" fill="url(#rbG)" stroke="#1565C0" strokeWidth="1.2"/>
-                <rect x="170" y="155" width="20" height="3" rx="1.5" fill="rgba(79,195,247,0.2)"/>
-                <rect x="170" y="162" width="20" height="3" rx="1.5" fill="rgba(79,195,247,0.12)"/>
-                <circle cx="180" cy="210" r="7" fill="#010E18" stroke="#0D47A1" strokeWidth="1"/>
-                {/* Legs */}
-                <rect x="52" y="234" width="40" height="46" rx="9" fill="url(#rbG)" stroke="#1565C0" strokeWidth="1.2"/>
-                <rect x="108" y="234" width="40" height="46" rx="9" fill="url(#rbG)" stroke="#1565C0" strokeWidth="1.2"/>
-                {/* Feet */}
-                <rect x="46" y="276" width="50" height="14" rx="6" fill="url(#rsG)" stroke="#0D47A1" strokeWidth="1"/>
-                <rect x="104" y="276" width="50" height="14" rx="6" fill="url(#rsG)" stroke="#0D47A1" strokeWidth="1"/>
-              </svg>
+            {/* Interactive 3D robot (ReactBits / Spline) */}
+            <div style={{ position:"relative", width:"100%", maxWidth:480, height:420 }}>
+              <SplineScene
+                scene="https://prod.spline.design/kZDDjO5HuC9GJUM2/scene.splinecode"
+                className="w-full h-full"
+              />
             </div>
 
             {/* Mini terminal */}

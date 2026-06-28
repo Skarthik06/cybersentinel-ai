@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * shadcn design tokens (dark theme). These back the `bg-card`, `text-card-foreground`,
+ * `border`, etc. utilities used by the shadcn components. They do NOT affect the
+ * existing inline-styled UI — preflight is disabled in tailwind.config.js.
+ */
+:root {
+  --background: 222 47% 4%;
+  --foreground: 210 40% 98%;
+  --card: 222 47% 5%;
+  --card-foreground: 210 40% 98%;
+  --muted: 217 33% 17%;
+  --muted-foreground: 215 20% 65%;
+  --border: 217 33% 20%;
+  --radius: 0.5rem;
+}
+
+/* Loading spinner shown by <SplineScene> while the 3D scene streams in. */
+.loader {
+  width: 40px;
+  height: 40px;
+  border: 3px solid rgba(0, 176, 255, 0.25);
+  border-top-color: #00e5ff;
+  border-radius: 50%;
+  animation: spline-spin 0.8s linear infinite;
+}
+
+@keyframes spline-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

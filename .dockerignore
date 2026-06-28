@@ -1,0 +1,13 @@
+# Prevent host-built artifacts from leaking into image builds.
+# Critical for the frontend: its Dockerfile runs `npm install` (Linux binaries)
+# and then COPYs frontend/ — without this, host node_modules (Windows binaries
+# for esbuild/rollup) would overwrite them and break Vite inside the container.
+**/node_modules
+frontend/dist
+
+# VCS / local noise
+.git
+.gitignore
+**/__pycache__
+*.pyc
+.env.example
