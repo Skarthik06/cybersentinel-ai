@@ -129,8 +129,11 @@ Write-OK "Kafka healthy."
 $redisPassword = ""
 $envFile = Join-Path $ProjectRoot ".env"
 if (Test-Path $envFile) {
-    Get-Content $envFile | ForEach-Object {
-        if ($_ -match "^REDIS_PASSWORD=(.+)") { $redisPassword = $Matches[1].Trim() }
+    # foreach statement (not ForEach-Object): keeps the $redisPassword assignment in
+    # the same scope where it's read below, so PSScriptAnalyzer doesn't false-flag it
+    # as "assigned but never used" (PSUseDeclaredVarsMoreThanAssignments).
+    foreach ($line in (Get-Content $envFile)) {
+        if ($line -match "^REDIS_PASSWORD=(.+)") { $redisPassword = $Matches[1].Trim() }
     }
 }
 
